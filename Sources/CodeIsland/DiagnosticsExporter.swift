@@ -41,13 +41,13 @@ struct DiagnosticsExporter {
         writeJSON(metadata(), to: root.appendingPathComponent("metadata.json"))
 
         // 2. Session snapshots (from AppState)
-        let sessionsJSON = DispatchQueue.main.sync { sessionSnapshots() }
+        let sessionsJSON = DispatchQueue.main.sync { MainActor.assumeIsolated { sessionSnapshots() } }
         writeJSON(sessionsJSON, to: root.appendingPathComponent("state/sessions.json"))
 
         // 2b. Recent hook events ring buffer (#103). Helps reproduce
         // session-routing / source-inference issues that only show up at
         // runtime — bug reports can ship with the actual event stream.
-        let hookEventsJSON = DispatchQueue.main.sync { recentHookEvents() }
+        let hookEventsJSON = DispatchQueue.main.sync { MainActor.assumeIsolated { recentHookEvents() } }
         writeJSON(hookEventsJSON, to: root.appendingPathComponent("state/hook-events.json"))
 
         // 3. CLI config files

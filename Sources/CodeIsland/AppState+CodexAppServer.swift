@@ -70,10 +70,10 @@ extension AppState {
 
         let client = CodexAppServerClient(executableURL: executable)
         client.onMessage = { [weak self] message in
-            Task { @MainActor in self?.handleCodexAppServerMessage(message) }
+            Task { @MainActor [weak self] in self?.handleCodexAppServerMessage(message) }
         }
         client.onExit = { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.codexAppServerClient = nil
                 self?.removeCodexAppServerSessions()
             }

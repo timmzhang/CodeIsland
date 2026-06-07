@@ -513,7 +513,7 @@ final class ESP32BridgeManager: NSObject {
             withTimeInterval: ESP32Protocol.pairResponseTimeoutSeconds,
             repeats: false
         ) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.handlePairResponseTimeout()
             }
         }
@@ -525,7 +525,7 @@ final class ESP32BridgeManager: NSObject {
             withTimeInterval: TimeInterval(ESP32Protocol.pairConfirmTimeoutSeconds),
             repeats: false
         ) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.handlePairTimeout()
             }
         }
@@ -660,7 +660,7 @@ final class ESP32BridgeManager: NSObject {
         status = .reconnecting(delay)
         Self.log.info("Scheduling reconnect in \(delay)s (attempt \(self.reconnectAttempt))")
         reconnectTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(delay), repeats: false) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.attemptReconnectToSelected()
             }
         }
@@ -690,7 +690,7 @@ final class ESP32BridgeManager: NSObject {
     private func startDiscoveryPruneTimer() {
         discoveryPruneTimer?.invalidate()
         discoveryPruneTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.pruneStaleDiscoveries()
             }
         }

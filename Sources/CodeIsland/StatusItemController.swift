@@ -19,7 +19,7 @@ final class StatusItemController: NSObject {
         observation = UserDefaults.standard.observe(
             \.hideWhenNoSession, options: [.new]
         ) { [weak self] _, _ in
-            Task { @MainActor in self?.syncVisibility() }
+            Task { @MainActor [weak self] in self?.syncVisibility() }
         }
     }
 

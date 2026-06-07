@@ -67,7 +67,7 @@ final class ESP32StatePublisher {
             }
             syncConfig()
             heartbeatTimer = Timer.scheduledTimer(withTimeInterval: heartbeatInterval, repeats: true) { [weak self] _ in
-                Task { @MainActor in
+                Task { @MainActor [weak self] in
                     self?.flush(reason: "heartbeat")
                 }
             }
@@ -223,7 +223,7 @@ extension AppState {
                 status: .waitingApproval,
                 tool: pending.event.toolName ?? pendingSession?.currentTool,
                 workspace: pendingSession?.projectDisplayName,
-                messages: Array(messages.suffix(3)),
+                messages: Array(messages.suffix(3))
             )
         }
 
@@ -240,7 +240,7 @@ extension AppState {
                 status: .waitingQuestion,
                 tool: pending.event.toolName ?? "AskUserQuestion",
                 workspace: pendingSession?.projectDisplayName,
-                messages: Array(messages.suffix(3)),
+                messages: Array(messages.suffix(3))
             )
         }
 
@@ -259,7 +259,7 @@ extension AppState {
                 ? session?.currentTool
                 : nil,
             workspace: session?.projectDisplayName,
-            messages: Array((session?.recentMessages ?? []).suffix(3)),
+            messages: Array((session?.recentMessages ?? []).suffix(3))
         )
     }
 

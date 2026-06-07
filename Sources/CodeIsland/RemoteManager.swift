@@ -109,8 +109,11 @@ final class RemoteManager: ObservableObject {
 
         Task {
             let remoteSocketPath = await RemoteInstaller.prepareRemoteSocketPath(host: host)
-            await MainActor.run {
-                self.remoteSocketPaths[host.id] = remoteSocketPath
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                var socketPaths = self.remoteSocketPaths
+                socketPaths[host.id] = remoteSocketPath
+                self.remoteSocketPaths = socketPaths
                 forwarder.connect(host: host, localSocketPath: HookServer.socketPath, remoteSocketPath: remoteSocketPath)
             }
         }
@@ -174,7 +177,9 @@ final class RemoteManager: ObservableObject {
                 guard let self else { return }
                 // Task may have been cancelled after the sleep; double-check.
                 guard self.reconnectTasks[hostId] != nil else { return }
-                self.reconnectTasks[hostId] = nil
+                var tasks = self.reconnectTasks
+                tasks[hostId] = nil
+                self.reconnectTasks = tasks
                 self.connectInternal(id: hostId)
             }
         }

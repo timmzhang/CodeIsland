@@ -86,7 +86,7 @@ final class AppState {
     /// constructed so the delta handler can safely capture `self`.
     @ObservationIgnored
     lazy var transcriptTailer: JSONLTailer = JSONLTailer { [weak self] delta in
-        Task { @MainActor in
+        Task { @MainActor [weak self] in
             self?.applyTranscriptDelta(delta)
         }
     }
@@ -157,7 +157,7 @@ final class AppState {
     private func startCleanupTimer() {
         guard cleanupTimer == nil else { return }
         cleanupTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.cleanupIdleSessions()
             }
         }
@@ -596,7 +596,7 @@ final class AppState {
             if rotationTimer == nil {
                 let interval = TimeInterval(max(1, SettingsManager.shared.rotationInterval))
                 rotationTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-                    Task { @MainActor in
+                    Task { @MainActor [weak self] in
                         self?.rotateToNextSession()
                     }
                 }
@@ -668,7 +668,7 @@ final class AppState {
                     self.setSessionProcessIdentity(discoveredProcess, for: sessionId)
                 }
 
-                if let monitorProcess = self.processMonitors[sessionId]?.process,
+                if let monitorProcess = self.processMonitors[sessionId].map(\.process),
                    monitorProcess == preferredProcess, Self.isLiveProcess(monitorProcess) {
                     return
                 }
@@ -1890,7 +1890,7 @@ final class AppState {
     private func scheduleSave() {
         saveTimer?.invalidate()
         saveTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.saveSessions()
             }
         }
@@ -2523,18 +2523,20 @@ final class AppState {
         for key in Array(processMonitors.keys) { stopMonitor(key) }
     }
 
-    isolated deinit {
-        rotationTimer?.invalidate()
-        cleanupTimer?.invalidate()
-        saveTimer?.invalidate()
-        if let stream = fsEventStream {
-            FSEventStreamStop(stream)
-            FSEventStreamInvalidate(stream)
-            FSEventStreamRelease(stream)
-        }
-        discoveryScanTask?.cancel()
-        for (_, monitor) in processMonitors {
-            monitor.source.cancel()
+    deinit {
+        MainActor.assumeIsolated {
+            rotationTimer?.invalidate()
+            cleanupTimer?.invalidate()
+            saveTimer?.invalidate()
+            if let stream = fsEventStream {
+                FSEventStreamStop(stream)
+                FSEventStreamInvalidate(stream)
+                FSEventStreamRelease(stream)
+            }
+            discoveryScanTask?.cancel()
+            for (_, monitor) in processMonitors {
+                monitor.source.cancel()
+            }
         }
     }
 

@@ -25,6 +25,9 @@ let package = Package(
             path: "Sources/CodeIsland",
             resources: [
                 .copy("Resources")
+            ],
+            swiftSettings: [
+                .unsafeFlags(["-Xfrontend", "-strict-concurrency=minimal"])
             ]
         ),
         .executableTarget(

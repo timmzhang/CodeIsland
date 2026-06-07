@@ -188,7 +188,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.refreshCurrentScreen(forceRebuild: true)
                 // macOS may not have finished updating NSScreen.screens when the notification fires.
                 // Rebuild again after a short delay to pick up the final screen configuration.
@@ -203,7 +203,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 self.refreshCurrentScreen()
                 if self.isActiveSpaceFullscreen() {
@@ -229,7 +229,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 self.refreshCurrentScreen()
                 if !self.fullscreenLatch { self.updateVisibility() }
@@ -393,7 +393,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 let newChoice = SettingsManager.shared.displayChoice
                 let newHeightMode = SettingsManager.shared.notchHeightMode.rawValue
@@ -428,7 +428,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
         // and every tick runs a full CGWindowListCopyWindowInfo, which was measurably
         // contributing to Energy Impact (#92).
         autoScreenPoller = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.refreshCurrentScreen()
             }
         }
@@ -525,7 +525,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
     private func startFullscreenExitPoller() {
         fullscreenPoller?.invalidate()
         fullscreenPoller = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self = self else { timer.invalidate(); return }
                 if !self.isActiveSpaceFullscreen() {
                     self.fullscreenLatch = false

@@ -8,6 +8,7 @@ enum NotchWidthMetrics {
     }
 }
 
+@MainActor
 struct NotchPanelView: View {
     var appState: AppState
     let hasNotch: Bool
@@ -315,6 +316,7 @@ struct NotchPanelView: View {
 // MARK: - Compact Wings (notch-level, 32px height)
 
 /// Left side: pixel character + status info
+@MainActor
 private struct CompactLeftWing: View {
     var appState: AppState
     let expanded: Bool
@@ -413,6 +415,7 @@ private struct CompactLeftWing: View {
 }
 
 /// Right side: project name + session count (detailed) or just count (simple)
+@MainActor
 private struct CompactRightWing: View {
     var appState: AppState
     let expanded: Bool
@@ -505,6 +508,7 @@ private func toolStatusColor(_ tool: String) -> Color {
 
 /// Shows the current tool activity in the center of the bar on non-notch screens.
 /// Keeps the last tool visible for a short linger period to avoid flashing.
+@MainActor
 private struct CompactToolStatus: View {
     var appState: AppState
 
@@ -603,6 +607,7 @@ private struct CompactToolStatus: View {
     }
 }
 
+@MainActor
 private struct NotchIconButton: View {
     let icon: String
     var tint: Color = .white
@@ -631,6 +636,7 @@ private struct NotchIconButton: View {
 
 // MARK: - Idle Indicator Bar
 
+@MainActor
 private struct IdleIndicatorBar: View {
     let mascotSize: CGFloat
     let compactWingWidth: CGFloat
@@ -682,6 +688,7 @@ private struct IdleIndicatorBar: View {
 
 // MARK: - Approval Bar (below notch, auto-expanded)
 
+@MainActor
 private struct ApprovalToolDetailView: View {
     let tool: String
     let toolInput: [String: Any]?
@@ -844,6 +851,7 @@ private struct ApprovalToolDetailView: View {
     }
 }
 
+@MainActor
 private struct ApprovalBar: View {
     let tool: String
     let toolInput: [String: Any]?
@@ -1017,6 +1025,7 @@ private struct ApprovalBar: View {
 
 // MARK: - Question Bar (below notch, auto-expanded)
 
+@MainActor
 private struct QuestionBar: View {
     let question: String
     let options: [String]?
@@ -1402,6 +1411,7 @@ private struct QuestionBar: View {
 
 // MARK: - Multi-Select Row (checkbox style)
 
+@MainActor
 private struct MultiSelectRow: View {
     let index: Int
     let label: String
@@ -1449,6 +1459,7 @@ private struct MultiSelectRow: View {
 
 // MARK: - Option Row
 
+@MainActor
 private struct OptionRow: View {
     let index: Int
     let label: String
@@ -1506,6 +1517,7 @@ private struct OptionRow: View {
     }
 }
 
+@MainActor
 private struct PixelButton: View {
     let label: String
     let fg: Color
@@ -1537,6 +1549,7 @@ private struct PixelButton: View {
 
 // MARK: - Session List
 
+@MainActor
 private struct SessionListView: View {
     var appState: AppState
     /// When set, only show this session (auto-expand on completion)
@@ -1717,6 +1730,7 @@ private struct ThinScrollView<Content: View>: NSViewRepresentable {
     }
 }
 
+@MainActor
 private struct SessionIdentityLine: View {
     let session: SessionSnapshot
     let sessionId: String
@@ -1765,6 +1779,7 @@ private struct SessionIdentityLine: View {
     }
 }
 
+@MainActor
 private struct ProjectNameLink: View {
     let name: String
     let cwd: String?
@@ -1787,6 +1802,7 @@ private struct ProjectNameLink: View {
     }
 }
 
+@MainActor
 private struct SessionsExpandLink: View {
     let count: Int
     let action: () -> Void
@@ -1883,6 +1899,7 @@ func approvalInlineSummary(tool: String, toolDescription: String?, toolInput: [S
     return nil
 }
 
+@MainActor
 private struct SessionCard: View {
     var appState: AppState
     let sessionId: String
@@ -2212,6 +2229,7 @@ private struct SessionCard: View {
 
 // MARK: - Claude Logo (official sunburst from simple-icons, viewBox 0 0 24 24)
 
+@MainActor
 private struct ClaudeLogo: View {
     var size: CGFloat = 22
     private static let color = Color(red: 0.85, green: 0.47, blue: 0.34) // #D97757
@@ -2393,6 +2411,7 @@ private struct NotchPanelShape: Shape {
 }
 
 /// Terminal icon + name badge (display only, not a button)
+@MainActor
 private struct TerminalBadge: View {
     let session: SessionSnapshot
 
@@ -2462,6 +2481,7 @@ private struct TerminalBadge: View {
 /// Collapsed single-line row for idle sessions >15 min
 // MARK: - Pixel Text (5×7 dot matrix style)
 
+@MainActor
 private struct PixelText: View {
     let text: String
     let color: Color
@@ -2588,6 +2608,7 @@ func cliIcon(source: String, size: CGFloat = 16) -> NSImage? {
     return image
 }
 
+@MainActor
 private struct SessionTag: View {
     let text: String
     var color: Color = .white.opacity(0.7)
@@ -2612,6 +2633,7 @@ private struct SessionTag: View {
 
 // MARK: - Typing Indicator (three bouncing dots)
 
+@MainActor
 private struct TypingIndicator: View {
     let fontSize: CGFloat
     var label: String? = nil
@@ -2665,6 +2687,7 @@ private struct TypingIndicator: View {
 
 // MARK: - Mini Agent Icon (8-bit robot head)
 
+@MainActor
 struct MiniAgentIcon: View {
     let active: Bool
     var size: CGFloat = 12
@@ -2693,12 +2716,18 @@ struct MiniAgentIcon: View {
                 for col in 0..<7 {
                     let v = grid[row][col]
                     guard v != 0 else { continue }
-                    let color: Color = switch v {
-                    case 2: eye
-                    case 3: glow
-                    case 4: bright
-                    case 5: dark
-                    default: base
+                    let color: Color
+                    switch v {
+                    case 2:
+                        color = eye
+                    case 3:
+                        color = glow
+                    case 4:
+                        color = bright
+                    case 5:
+                        color = dark
+                    default:
+                        color = base
                     }
                     ctx.fill(
                         Path(CGRect(x: CGFloat(col) * px, y: CGFloat(row) * px, width: px, height: px)),
@@ -2764,6 +2793,7 @@ private func subagentTooltipText(_ sub: SubagentState) -> String {
 
 /// Separate view so SwiftUI skips body re-evaluation when only the parent's
 /// hover state changes — avoids expensive text processing on every hover.
+@MainActor
 private struct ChatMessageRow: View, Equatable {
     let text: String
     let isUser: Bool
