@@ -2418,7 +2418,7 @@ private struct TerminalBadge: View {
     private static let sourceBundleIds: [String: String] = [
         "cursor": "com.todesktop.230313mzl4w4u92",
         "trae": "com.trae.app",
-        "traecn": "com.trae.app",
+        "traecn": "cn.trae.app",
         "qoder": "com.qoder.ide",
         "droid": "com.factory.app",
         "codebuddy": "com.tencent.codebuddy",

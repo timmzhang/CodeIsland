@@ -42,7 +42,7 @@ struct TerminalActivator {
         "codex": "com.openai.codex",
         "cursor": "com.todesktop.230313mzl4w4u92",
         "trae": "com.trae.app",
-        "traecn": "com.trae.app",
+        "traecn": "cn.trae.app",
         "qoder": "com.qoder.ide",
         "droid": "com.factory.app",
         "codebuddy": "com.tencent.codebuddy",
@@ -59,6 +59,7 @@ struct TerminalActivator {
         "com.openai.codex": "Codex",
         "com.todesktop.230313mzl4w4u92": "Cursor",
         "com.trae.app": "Trae",
+        "cn.trae.app": "Trae CN",
         "com.qoder.ide": "Qoder",
         "com.factory.app": "Factory",
         "com.tencent.codebuddy": "CodeBuddy",
@@ -68,8 +69,22 @@ struct TerminalActivator {
         "com.workbuddy.workbuddy": "WorkBuddy",
     ]
 
+    private static let sourceNativeAppOverrides: [String: String] = [
+        "trae": "com.trae.app",
+        "traecn": "cn.trae.app",
+    ]
+
     static func activate(session: SessionSnapshot, sessionId: String? = nil) {
         guard !session.isRemote else { return }
+
+        // Trae app hooks can inherit terminal environment variables from their
+        // launcher. In that case termBundleId/TERM_PROGRAM may point at Terminal.app
+        // even though the session belongs to the native IDE.
+        if let bundleId = sourceNativeAppOverrides[session.source],
+           NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == bundleId }) {
+            activateIDEWindow(bundleId: bundleId, cwd: session.cwd)
+            return
+        }
 
         // Native app by bundle ID (e.g. Codex APP vs Codex CLI). These are IDE-style
         // apps (Cursor, Trae, Qoder, Factory, …) that can hold several workspace

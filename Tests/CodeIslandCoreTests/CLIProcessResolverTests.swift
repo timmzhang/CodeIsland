@@ -99,4 +99,37 @@ final class CLIProcessResolverTests: XCTestCase {
             -1
         )
     }
+
+    func testTraeCNAppProcessMatchesSource() {
+        XCTAssertTrue(CLIProcessResolver.sourceMatchesExecutablePath(
+            "/Applications/Trae CN.app/Contents/Resources/app/modules/ai-agent/bin/agent-tool-host",
+            source: "traecn"
+        ))
+        XCTAssertTrue(CLIProcessResolver.sourceMatchesExecutablePath(
+            "/Applications/Trae CN.app/Contents/Frameworks/Trae CN Helper.app/Contents/MacOS/Trae CN Helper",
+            source: "traecn"
+        ))
+    }
+
+    func testTraeCNFallbackSessionPIDUsesAppRoot() {
+        let ancestry: [(pid: Int32, executablePath: String?)] = [
+            (1234, "/bin/sh"),
+            (2222, "/Applications/Trae CN.app/Contents/Resources/app/modules/ai-agent/bin/agent-tool-host"),
+            (3333, "/Applications/Trae CN.app/Contents/MacOS/Electron"),
+        ]
+
+        let session = CLIProcessResolver.resolvedSessionPID(
+            immediateParentPID: 1234,
+            source: "traecn",
+            ancestry: ancestry
+        )
+        let tracked = CLIProcessResolver.resolvedTrackedPID(
+            immediateParentPID: 1234,
+            source: "traecn",
+            ancestry: ancestry
+        )
+
+        XCTAssertEqual(session, 3333)
+        XCTAssertEqual(tracked, 2222)
+    }
 }

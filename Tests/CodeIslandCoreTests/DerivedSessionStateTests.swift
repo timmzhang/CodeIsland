@@ -27,6 +27,16 @@ final class DerivedSessionStateTests: XCTestCase {
         XCTAssertEqual(SessionSnapshot.normalizedSupportedSource("traecli"), "traecli")
     }
 
+    func testTraeCNBundleIsNativeAppMode() {
+        var session = SessionSnapshot()
+        session.source = "traecn"
+        session.termBundleId = "cn.trae.app"
+
+        XCTAssertTrue(session.isNativeAppMode)
+        XCTAssertFalse(session.isIDETerminal)
+        XCTAssertEqual(session.terminalName, "Trae CN")
+    }
+
     func testNormalizesThirdPartySourceAliases() {
         XCTAssertEqual(SessionSnapshot.normalizedSupportedSource("workbody"), "workbuddy")
         XCTAssertEqual(SessionSnapshot.normalizedSupportedSource("work-body"), "workbuddy")

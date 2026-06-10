@@ -330,7 +330,7 @@ public struct SessionSnapshot: Sendable {
         if Self.appBundleNames[bid] != nil { return true }
         let lower = bid.lowercased()
         return lower.contains("vscode") || lower.contains("vscodium")
-            || lower == "com.trae.app"
+            || lower == "com.trae.app" || lower == "cn.trae.app"
             || lower.contains("windsurf") || lower.contains("codeium")
             || lower.contains("jetbrains")
             || lower.contains("zed")
@@ -344,6 +344,7 @@ public struct SessionSnapshot: Sendable {
     private static let appBundleNames: [String: String] = [
         "com.todesktop.230313mzl4w4u92": "Cursor",
         "com.trae.app": "Trae",
+        "cn.trae.app": "Trae CN",
         "com.qoder.ide": "Qoder",
         "com.factory.app": "Factory",
         "com.tencent.codebuddy": "CodeBuddy",
@@ -358,6 +359,7 @@ public struct SessionSnapshot: Sendable {
     private static let appBundleSources: [String: String] = [
         "com.todesktop.230313mzl4w4u92": "cursor",
         "com.trae.app": "trae",
+        "cn.trae.app": "traecn",
         "com.qoder.ide": "qoder",
         "com.factory.app": "droid",
         "com.tencent.codebuddy": "codebuddy",
@@ -389,6 +391,7 @@ public struct SessionSnapshot: Sendable {
             // IDE integrated terminals
             if lower.contains("vscode") || lower.contains("vscodium") { return "VS Code" }
             if lower == "com.trae.app" { return "Trae" }
+            if lower == "cn.trae.app" { return "Trae CN" }
             if lower.contains("windsurf") { return "Windsurf" }
             if lower.contains("jetbrains") {
                 if lower.contains("intellij") { return "IDEA" }

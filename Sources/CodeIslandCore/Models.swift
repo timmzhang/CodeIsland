@@ -6,6 +6,21 @@ public enum CLIProcessResolver {
         let lowercasedPath = path.lowercased()
 
         switch normalizedSource {
+        case "trae":
+            return lowercasedPath.contains("/trae.app/contents/")
+                || lowercasedPath.contains("/.trae/")
+                || lowercasedPath.hasSuffix("/trae")
+                || lowercasedPath.contains("/trae ")
+        case "traecn":
+            return lowercasedPath.contains("/trae cn.app/contents/")
+                || lowercasedPath.contains("/trae-cn.app/contents/")
+                || lowercasedPath.contains("/traecn.app/contents/")
+                || lowercasedPath.contains("/.trae-cn/")
+                || lowercasedPath.contains("/.traecn/")
+                || lowercasedPath.hasSuffix("/traecn")
+                || lowercasedPath.hasSuffix("/trae-cn")
+                || lowercasedPath.contains("/traecn ")
+                || lowercasedPath.contains("/trae-cn ")
         case "traecli":
             return lowercasedPath.hasSuffix("/coco")
                 || lowercasedPath.hasSuffix("/traecli")

@@ -391,7 +391,9 @@ final class AppState {
         switch source {
         case "cursor":     return path.contains("/cursor.app/contents/")
         case "trae":       return path.contains("/trae.app/contents/")
-        case "traecn":     return path.contains("/trae.app/contents/") || path.contains("/traecn.app/contents/")
+        case "traecn":     return path.contains("/trae cn.app/contents/")
+            || path.contains("/trae-cn.app/contents/")
+            || path.contains("/traecn.app/contents/")
         case "qoder":      return path.contains("/qoder.app/contents/")
         case "droid":      return path.contains("/factory.app/contents/")
         case "codebuddy":  return path.contains("/codebuddy.app/contents/")
@@ -2800,6 +2802,7 @@ final class AppState {
     private nonisolated static func findTraeCNPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
         findPids(
             matchingPathSubstrings: [
+                "/trae cn.app/contents/",
                 "/traecn.app/contents/macos/trae",
                 "/trae-cn.app/contents/macos/trae",
                 "/.traecn/",
