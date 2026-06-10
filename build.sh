@@ -144,24 +144,29 @@ build_mac() {
         SIGN_ID="-"
     fi
 
+    CODESIGN_OPTS=(--force --sign "$SIGN_ID")
+    if [ "$SIGN_ID" != "-" ]; then
+        CODESIGN_OPTS=(--force --options runtime --sign "$SIGN_ID")
+    fi
+
     echo "Code signing ($SIGN_ID)..."
     # Sign embedded frameworks first (inside-out).
     SPARKLE_FW="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
     # Sign nested helpers inside Sparkle before the framework itself.
     for xpc in "$SPARKLE_FW/Versions/B/XPCServices/"*.xpc; do
         [ -e "$xpc" ] || continue
-        codesign --force --options runtime --sign "$SIGN_ID" "$xpc"
+        codesign "${CODESIGN_OPTS[@]}" "$xpc"
     done
     if [ -d "$SPARKLE_FW/Versions/B/Updater.app" ]; then
-        codesign --force --options runtime --sign "$SIGN_ID" "$SPARKLE_FW/Versions/B/Updater.app"
+        codesign "${CODESIGN_OPTS[@]}" "$SPARKLE_FW/Versions/B/Updater.app"
     fi
     if [ -e "$SPARKLE_FW/Versions/B/Autoupdate" ]; then
-        codesign --force --options runtime --sign "$SIGN_ID" "$SPARKLE_FW/Versions/B/Autoupdate"
+        codesign "${CODESIGN_OPTS[@]}" "$SPARKLE_FW/Versions/B/Autoupdate"
     fi
-    codesign --force --options runtime --sign "$SIGN_ID" "$SPARKLE_FW"
+    codesign "${CODESIGN_OPTS[@]}" "$SPARKLE_FW"
 
-    codesign --force --options runtime --sign "$SIGN_ID" "$APP_BUNDLE/Contents/Helpers/codeisland-bridge"
-    codesign --force --options runtime --sign "$SIGN_ID" --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
+    codesign "${CODESIGN_OPTS[@]}" "$APP_BUNDLE/Contents/Helpers/codeisland-bridge"
+    codesign "${CODESIGN_OPTS[@]}" --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
 
     if [ "$NOTARIZE" = true ] && [[ "$SIGN_ID" == *"Developer ID"* ]]; then
         echo "Creating ZIP for notarization..."
