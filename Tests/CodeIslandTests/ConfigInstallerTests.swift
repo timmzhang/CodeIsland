@@ -124,6 +124,44 @@ final class ConfigInstallerTests: XCTestCase {
         XCTAssertTrue(command.contains("--event stop"))
     }
 
+    func testRepairTraeCNSandboxPermissionsAddsCodeIslandDirectory() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let sandbox = tempDir.appendingPathComponent("sandbox")
+        try fm.createDirectory(at: sandbox, withIntermediateDirectories: true)
+        let config = sandbox.appendingPathComponent("session-hooks.json")
+        try """
+        {
+          "name": "session-hooks",
+          "permission": [
+            { "file_inherit_user": "/tmp" }
+          ]
+        }
+        """.write(to: config, atomically: true, encoding: .utf8)
+
+        XCTAssertTrue(ConfigInstaller.repairTraeCNSandboxPermissions(
+            fm: fm,
+            sandboxDir: sandbox.path,
+            bridgeDir: "/Users/test/.codeisland"
+        ))
+        XCTAssertFalse(ConfigInstaller.repairTraeCNSandboxPermissions(
+            fm: fm,
+            sandboxDir: sandbox.path,
+            bridgeDir: "/Users/test/.codeisland"
+        ))
+
+        let data = try XCTUnwrap(fm.contents(atPath: config.path))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let permissions = try XCTUnwrap(root["permission"] as? [[String: Any]])
+        XCTAssertEqual(
+            permissions.filter { $0["file_inherit_user"] as? String == "/Users/test/.codeisland" }.count,
+            1
+        )
+    }
+
     // MARK: - Kimi Code CLI TOML hooks
 
     func testRemoveKimiHooksPreservesNonCodeIslandBlocks() {

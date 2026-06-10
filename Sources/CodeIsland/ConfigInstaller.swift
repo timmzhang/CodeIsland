@@ -614,6 +614,7 @@ struct ConfigInstaller {
     // has it we should merge our plugin entry there instead of resurrecting
     // opencode.json. See issue #132.
     private static let opencodeConfigPathJsonc = NSHomeDirectory() + "/.config/opencode/opencode.jsonc"
+    private static let traeCNSandboxDir = NSHomeDirectory() + "/Library/Application Support/Trae CN/ModularData/ai-agent/sandbox"
 
     // MARK: - Install / Uninstall
 
@@ -643,6 +644,9 @@ struct ConfigInstaller {
                 continue
             } else {
                 if !installExternalHooks(cli: cli, fm: fm) { ok = false }
+                if cli.source == "traecn" {
+                    repairTraeCNSandboxPermissions(fm: fm)
+                }
             }
         }
 
@@ -764,6 +768,9 @@ struct ConfigInstaller {
             } else {
                 installExternalHooks(cli: cli, fm: fm)
                 if cli.source == "codex" { enableCodexHooksConfig(fm: fm) }
+                if cli.source == "traecn" {
+                    repairTraeCNSandboxPermissions(fm: fm)
+                }
                 return isHooksInstalled(for: cli, fm: fm)
             }
         } else {
@@ -805,6 +812,10 @@ struct ConfigInstaller {
                 dirExists = fm.fileExists(atPath: cli.dirPath)
             }
             guard dirExists else { continue }
+            if cli.source == "traecn",
+               repairTraeCNSandboxPermissions(fm: fm) {
+                repaired.append("Trae CN Sandbox")
+            }
             if cli.source == "traecli" {
                 if isTraecliHooksInstalled(fm: fm) { continue }
                 if installTraecliHooks(fm: fm) {
@@ -867,6 +878,50 @@ struct ConfigInstaller {
             if installOmpExtension(fm: fm) { repaired.append("Oh My Pi") }
         }
         return repaired
+    }
+
+    // MARK: - Trae CN sandbox
+
+    /// Trae CN runs hooks inside its ai-agent sandbox. The bridge lives under
+    /// ~/.codeisland, so the sandbox config must inherit that directory or the
+    /// hook command can complete without ever launching codeisland-bridge.
+    @discardableResult
+    static func repairTraeCNSandboxPermissions(
+        fm: FileManager = .default,
+        sandboxDir: String = traeCNSandboxDir,
+        bridgeDir: String = codeislandDir
+    ) -> Bool {
+        guard fm.fileExists(atPath: sandboxDir),
+              let entries = try? fm.contentsOfDirectory(atPath: sandboxDir)
+        else { return false }
+
+        var changedAny = false
+        for entry in entries where entry.hasSuffix(".json") {
+            let path = (sandboxDir as NSString).appendingPathComponent(entry)
+            guard var root = parseJSONFile(at: path, fm: fm),
+                  var permissions = root["permission"] as? [[String: Any]]
+            else { continue }
+
+            let alreadyAllowed = permissions.contains { item in
+                item["file_inherit_user"] as? String == bridgeDir
+            }
+            guard !alreadyAllowed else { continue }
+
+            permissions.append(["file_inherit_user": bridgeDir])
+            root["permission"] = permissions
+
+            guard JSONSerialization.isValidJSONObject(root),
+                  let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted])
+            else { continue }
+
+            do {
+                try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+                changedAny = true
+            } catch {
+                continue
+            }
+        }
+        return changedAny
     }
 
     // MARK: - JSONC Support
