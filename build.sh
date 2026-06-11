@@ -19,14 +19,16 @@ WATCH_APK_DEBUG="$WATCH_DIR/app/build/outputs/apk/debug/app-debug.apk"
 BUILD_MAC=true
 BUILD_WATCH=false
 NOTARIZE=false
+INSTALL=true
 
 usage() {
     cat <<'EOF'
-Usage: ./build.sh [--watch] [--with-watch] [--notarize]
+Usage: ./build.sh [--watch] [--with-watch] [--notarize] [--no-install]
 
   --watch       Build Android watch app only
   --with-watch  Build macOS app and Android watch app
   --notarize    Notarize macOS app bundle / DMG after signing
+  --no-install  Skip installing the app bundle to /Applications
   --help        Show this help
 EOF
 }
@@ -42,6 +44,9 @@ for arg in "$@"; do
             ;;
         --notarize)
             NOTARIZE=true
+            ;;
+        --no-install)
+            INSTALL=false
             ;;
         --help|-h)
             usage
@@ -215,8 +220,29 @@ build_mac() {
         fi
     fi
 
-    echo "Done: $APP_BUNDLE"
-    echo "Run: open $APP_BUNDLE"
+    if [ "$INSTALL" = true ]; then
+        INSTALLED_APP="/Applications/$APP_NAME.app"
+        echo "Installing to $INSTALLED_APP..."
+        WAS_RUNNING=false
+        if pgrep -xq "$APP_NAME"; then
+            WAS_RUNNING=true
+            osascript -e "quit app \"$APP_NAME\"" 2>/dev/null || true
+            sleep 1
+            pkill -x "$APP_NAME" 2>/dev/null || true
+        fi
+        rm -rf "$INSTALLED_APP"
+        # ditto preserves code signatures, symlinks and extended attributes.
+        ditto "$APP_BUNDLE" "$INSTALLED_APP"
+        if [ "$WAS_RUNNING" = true ]; then
+            echo "Relaunching $APP_NAME..."
+            open "$INSTALLED_APP"
+        fi
+        echo "Done: $INSTALLED_APP"
+        echo "Run: open $INSTALLED_APP"
+    else
+        echo "Done: $APP_BUNDLE"
+        echo "Run: open $APP_BUNDLE"
+    fi
 }
 
 if [ "$BUILD_MAC" = true ]; then
