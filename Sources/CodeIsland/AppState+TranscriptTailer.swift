@@ -39,6 +39,21 @@ extension AppState {
             mutated = true
         }
 
+        // Claude never fires the Stop hook when the user interrupts a turn (Esc), and
+        // Claude Desktop keeps its bundled `claude` engine process alive between turns,
+        // so neither the hook path nor process-exit/timeout sweeps ever settle the
+        // session — it stays "thinking" forever. The transcript's interrupt marker is
+        // the only reliable end-of-turn signal in that case.
+        if let prompt = delta.lastUserPrompt,
+           prompt.hasPrefix("[Request interrupted by user"),
+           session.status != .idle {
+            session.status = .idle
+            session.interrupted = true
+            session.currentTool = nil
+            session.toolDescription = nil
+            mutated = true
+        }
+
         if mutated {
             session.lastActivity = Date()
             sessions[delta.sessionId] = session
