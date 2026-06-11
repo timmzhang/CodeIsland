@@ -56,6 +56,7 @@ struct TerminalActivator {
     /// When termBundleId matches, bring that app to front;
     /// otherwise fall through to terminal tab-matching.
     private static let nativeAppBundles: [String: String] = [
+        "com.anthropic.claudefordesktop": "Claude",
         "com.openai.codex": "Codex",
         "com.todesktop.230313mzl4w4u92": "Cursor",
         "com.trae.app": "Trae",
@@ -965,6 +966,13 @@ struct TerminalActivator {
 
         if app.isHidden { app.unhide() }
         app.activate()
+        // NSRunningApplication.activate() does not switch Spaces, so Electron apps
+        // (Claude Desktop, Cursor, Trae, …) living on another desktop won't come
+        // forward. NSWorkspace.openApplication reliably raises them and follows the
+        // Space switch — mirror what activateByBundleId does for these apps.
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+        }
 
         // Use System Events to iterate windows and AXRaise the best match.
         // Priority: exact folder name at word boundary > shortest title containing folder name.

@@ -106,7 +106,12 @@ build_mac() {
         "$APP_BUNDLE/Contents/Helpers/codeisland-bridge" 2>/dev/null || true
 
     echo "Compiling app icon assets..."
-    xcrun actool \
+    # actool compiles the modern .icon (Icon Composer) catalog, which pulls in
+    # CoreSimulator for rendering. On machines where that framework fails to load
+    # ("library load denied by system policy") actool aborts. The bundle still runs
+    # fine off the AppIcon.icns fallback below, so don't let an icon-tool failure
+    # fail the whole release build — warn and continue.
+    if ! xcrun actool \
         --output-format human-readable-text \
         --warnings \
         --errors \
@@ -118,7 +123,10 @@ build_mac() {
         --output-partial-info-plist "$ICON_INFO_PLIST" \
         --compile "$APP_BUNDLE/Contents/Resources" \
         "$ICON_CATALOG" \
-        "$ICON_SOURCE"
+        "$ICON_SOURCE"; then
+        echo "WARNING: actool failed to compile asset catalog — falling back to AppIcon.icns only." >&2
+        echo "         To restore full icon compilation run: sudo xcodebuild -runFirstLaunch" >&2
+    fi
     cp "Sources/CodeIsland/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
     # Copy SPM resource bundles into Contents/Resources/ (required for code signing)
