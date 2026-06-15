@@ -152,6 +152,17 @@ public struct SessionSnapshot: Sendable {
         return nil
     }
 
+    public static func sourceCorrectedForNativeBundle(source: String, termBundleId: String?) -> String {
+        guard let termBundleId,
+              let bundleSource = appBundleSources[termBundleId] else { return source }
+        switch (source, bundleSource) {
+        case ("trae", "traecn"), ("traecn", "trae"):
+            return bundleSource
+        default:
+            return source
+        }
+    }
+
     private static func loadCustomSources() -> Set<String> {
         guard let data = UserDefaults.standard.data(forKey: customCLIConfigsKey),
               let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
@@ -253,6 +264,11 @@ public struct SessionSnapshot: Sendable {
         guard let remoteHostName else { return nil }
         let trimmed = remoteHostName.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    public var hasUnansweredPrompt: Bool {
+        if recentMessages.last?.isUser == true { return true }
+        return lastUserPrompt != nil && lastAssistantMessage == nil
     }
 
     public var sessionLabel: String? {
@@ -541,7 +557,7 @@ public func reduceEvent(
     // Always update metadata from parent events. Subagent events are routed
     // through the parent session ID, so applying their metadata here would
     // overwrite the parent's model/transcript/title with child-session values.
-    if event.agentId == nil {
+    if !event.routesAsSubagent {
         extractMetadata(into: &sessions, sessionId: sessionId, event: event)
     }
     let isRemote = sessions[sessionId]?.isRemote == true
@@ -559,7 +575,7 @@ public func reduceEvent(
     }
 
     // Route subagent-specific events
-    if let agentId = event.agentId {
+    if event.routesAsSubagent, let agentId = event.agentId {
         let handled = handleSubagentEvent(
             sessions: &sessions,
             sessionId: sessionId,
@@ -734,6 +750,13 @@ public func reduceEvent(
         }
         if let app = event.rawJSON["_term_app"] as? String, !app.isEmpty { sessions[sessionId]?.termApp = app }
         if let bundle = event.rawJSON["_term_bundle"] as? String, !bundle.isEmpty { sessions[sessionId]?.termBundleId = bundle }
+        if let source = sessions[sessionId]?.source {
+            let termBundleId = sessions[sessionId]?.termBundleId
+            sessions[sessionId]?.source = SessionSnapshot.sourceCorrectedForNativeBundle(
+                source: source,
+                termBundleId: termBundleId
+            )
+        }
         if let ses = event.rawJSON["_iterm_session"] as? String, !ses.isEmpty { sessions[sessionId]?.itermSessionId = ses }
         if let tty = event.rawJSON["_tty"] as? String, !tty.isEmpty { sessions[sessionId]?.ttyPath = tty }
         if let kitty = event.rawJSON["_kitty_window"] as? String, !kitty.isEmpty { sessions[sessionId]?.kittyWindowId = kitty }
@@ -910,8 +933,17 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
         sessions[sessionId]?.cliPid = pid_t(ppid)
         sessions[sessionId]?.cliStartTime = nil
     }
+    let termBundleId = sessions[sessionId]?.termBundleId
     if let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) {
-        sessions[sessionId]?.source = source
+        sessions[sessionId]?.source = SessionSnapshot.sourceCorrectedForNativeBundle(
+            source: source,
+            termBundleId: termBundleId
+        )
+    } else if let source = sessions[sessionId]?.source {
+        sessions[sessionId]?.source = SessionSnapshot.sourceCorrectedForNativeBundle(
+            source: source,
+            termBundleId: termBundleId
+        )
     }
     // cmux surface / workspace (injected by bridge from CMUX_SURFACE_ID / CMUX_WORKSPACE_ID env vars)
     if let surface = event.rawJSON["_cmux_surface_id"] as? String, !surface.isEmpty {

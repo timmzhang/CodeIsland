@@ -37,9 +37,30 @@ enum SessionPersistence {
     private static let dirPath = FileManager.default.homeDirectoryForCurrentUser.path + "/.codeisland"
     private static let filePath = dirPath + "/sessions.json"
 
+    static func hasPersistenceAnchor(_ s: SessionSnapshot) -> Bool {
+        s.cwd != nil
+            || s.lastUserPrompt != nil
+            || s.lastAssistantMessage != nil
+            || s.termApp != nil
+            || s.itermSessionId != nil
+            || s.ttyPath != nil
+            || s.kittyWindowId != nil
+            || s.tmuxPane != nil
+            || s.tmuxClientTty != nil
+            || s.tmuxEnv != nil
+            || s.termBundleId != nil
+            || s.cmuxSurfaceId != nil
+            || s.cmuxWorkspaceId != nil
+            || s.zellijPaneId != nil
+            || s.zellijSessionName != nil
+            || s.weztermPaneId != nil
+            || s.cliPid != nil
+    }
+
     static func save(_ sessions: [String: SessionSnapshot]) {
         let persisted: [PersistedSession] = sessions.compactMap { (id, s) in
             guard !s.isRemote else { return nil }
+            guard hasPersistenceAnchor(s) else { return nil }
             return PersistedSession(
                 sessionId: id,
                 cwd: s.cwd,

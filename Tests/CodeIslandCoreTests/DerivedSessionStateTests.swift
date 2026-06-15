@@ -37,6 +37,50 @@ final class DerivedSessionStateTests: XCTestCase {
         XCTAssertEqual(session.terminalName, "Trae CN")
     }
 
+    func testTraeSourceIsCorrectedByNativeBundle() {
+        XCTAssertEqual(
+            SessionSnapshot.sourceCorrectedForNativeBundle(source: "trae", termBundleId: "cn.trae.app"),
+            "traecn"
+        )
+        XCTAssertEqual(
+            SessionSnapshot.sourceCorrectedForNativeBundle(source: "claude", termBundleId: "cn.trae.app"),
+            "claude"
+        )
+    }
+
+    func testEventMetadataCorrectsTraeCNSourceFromBundle() throws {
+        var sessions: [String: SessionSnapshot] = [:]
+        let event = try decode([
+            "hook_event_name": "beforeSubmitPrompt",
+            "session_id": "traecn-session",
+            "_source": "trae",
+            "_term_bundle": "cn.trae.app",
+            "cwd": "/Users/timmzhang/Workspace/bytedance/trae-op",
+            "prompt": "继续验证",
+        ])
+
+        _ = reduceEvent(sessions: &sessions, event: event, maxHistory: 10)
+
+        XCTAssertEqual(sessions["traecn-session"]?.source, "traecn")
+        XCTAssertEqual(sessions["traecn-session"]?.terminalName, "Trae CN")
+    }
+
+    func testSessionDetectsUnansweredPrompt() {
+        var session = SessionSnapshot()
+        session.lastUserPrompt = "please continue"
+
+        XCTAssertTrue(session.hasUnansweredPrompt)
+
+        session.lastAssistantMessage = "done"
+        XCTAssertFalse(session.hasUnansweredPrompt)
+
+        session.recentMessages = [
+            ChatMessage(isUser: false, text: "done"),
+            ChatMessage(isUser: true, text: "try again"),
+        ]
+        XCTAssertTrue(session.hasUnansweredPrompt)
+    }
+
     func testNormalizesThirdPartySourceAliases() {
         XCTAssertEqual(SessionSnapshot.normalizedSupportedSource("workbody"), "workbuddy")
         XCTAssertEqual(SessionSnapshot.normalizedSupportedSource("work-body"), "workbuddy")
@@ -53,6 +97,30 @@ final class DerivedSessionStateTests: XCTestCase {
     func testNormalizesClineTaskTerminalEvents() {
         XCTAssertEqual(EventNormalizer.normalize("TaskComplete"), "TaskRoundComplete")
         XCTAssertEqual(EventNormalizer.normalize("TaskCancel"), "TaskRoundComplete")
+    }
+
+    func testTraeCNSoloAgentMarkerUpdatesMainSession() throws {
+        var sessions: [String: SessionSnapshot] = [:]
+        let event = try decode([
+            "hook_event_name": "beforeSubmitPrompt",
+            "session_id": "6a2fdf0a933a47979bed2f00",
+            "_source": "traecn",
+            "cwd": "/Users/timmzhang/Workspace/bytedance/trae-op",
+            "agent_id": "solo_agent",
+            "prompt": "调整L1分类下拉框宽度",
+        ])
+
+        XCTAssertFalse(event.routesAsSubagent)
+
+        let effects = reduceEvent(sessions: &sessions, event: event, maxHistory: 10)
+
+        let session = try XCTUnwrap(sessions["6a2fdf0a933a47979bed2f00"])
+        XCTAssertEqual(session.source, "traecn")
+        XCTAssertEqual(session.cwd, "/Users/timmzhang/Workspace/bytedance/trae-op")
+        XCTAssertEqual(session.status, .processing)
+        XCTAssertEqual(session.lastUserPrompt, "调整L1分类下拉框宽度")
+        XCTAssertTrue(session.subagents.isEmpty)
+        XCTAssertTrue(effects.contains(.setActiveSession(sessionId: "6a2fdf0a933a47979bed2f00")))
     }
 
     func testAfterAgentResponseCompletesIDESource() throws {
@@ -78,6 +146,33 @@ final class DerivedSessionStateTests: XCTestCase {
         XCTAssertEqual(sessions["cursor-session"]?.lastAssistantMessage, "Done")
         XCTAssertEqual(sessions["cursor-session"]?.recentMessages.last?.text, "Done")
         XCTAssertTrue(effects.contains(.enqueueCompletion(sessionId: "cursor-session")))
+    }
+
+    func testAfterAgentResponseCompletesTraeCNSource() throws {
+        var session = SessionSnapshot()
+        session.source = "traecn"
+        session.status = .running
+        session.currentTool = "Agent"
+        session.toolDescription = "thinking"
+
+        var sessions = ["traecn-session": session]
+        let event = try decode([
+            "hook_event_name": "afterAgentResponse",
+            "session_id": "traecn-session",
+            "_source": "traecn",
+            "agent_id": "solo_agent",
+            "text": "Done",
+        ])
+
+        XCTAssertFalse(event.routesAsSubagent)
+
+        let effects = reduceEvent(sessions: &sessions, event: event, maxHistory: 10)
+
+        XCTAssertEqual(sessions["traecn-session"]?.status, .idle)
+        XCTAssertNil(sessions["traecn-session"]?.currentTool)
+        XCTAssertNil(sessions["traecn-session"]?.toolDescription)
+        XCTAssertEqual(sessions["traecn-session"]?.lastAssistantMessage, "Done")
+        XCTAssertTrue(effects.contains(.enqueueCompletion(sessionId: "traecn-session")))
     }
 
     func testAfterAgentResponseKeepsCLISourceProcessing() throws {

@@ -182,6 +182,15 @@ public struct HookEvent {
         self.rawJSON = json
     }
 
+    public var routesAsSubagent: Bool {
+        guard let agentId else { return false }
+        let normalized = agentId
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+        return !normalized.isEmpty && normalized != "solo_agent"
+    }
+
     public var toolDescription: String? {
         if let input = toolInput {
             switch toolName {

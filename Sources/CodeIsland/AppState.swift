@@ -193,6 +193,20 @@ final class AppState {
             removeSession(sessionId)
         }
 
+        // 1b. Drop synthetic subagent/plugin shells that never acquired enough
+        // metadata to become a jumpable or inspectable session. These show up as
+        // "Session #xxxx" with no cwd/PID/terminal and otherwise animate forever.
+        let anchorlessSessionTimeout: TimeInterval = 30
+        for (key, session) in sessions
+            where processMonitors[key] == nil
+            && !session.isRemote
+            && !hasRuntimeAnchor(session) {
+            let elapsed = -session.lastActivity.timeIntervalSinceNow
+            if session.status == .idle || elapsed > anchorlessSessionTimeout {
+                removeSession(key)
+            }
+        }
+
         // 2. Reset likely-stuck sessions only when we have no process monitor.
         //    If the process is still monitored/alive, trust explicit Stop/SessionEnd or
         //    process exit instead of synthesizing idle and risking false-idle mid-thought.
@@ -211,11 +225,21 @@ final class AppState {
             && !session.isRemote {
             let elapsed = -session.lastActivity.timeIntervalSinceNow
             let threshold: TimeInterval
-            switch session.status {
-            case .waitingApproval, .waitingQuestion: threshold = 300
-            default: threshold = session.currentTool != nil ? 180 : 300
+            if SessionSnapshot.ideCompletionSources.contains(session.source),
+               session.status == .processing,
+               session.currentTool == nil,
+               session.toolDescription == nil {
+                threshold = 30
+            } else {
+                switch session.status {
+                case .waitingApproval, .waitingQuestion: threshold = 300
+                default: threshold = session.currentTool != nil ? 180 : 300
+                }
             }
             if elapsed > threshold {
+                if session.hasUnansweredPrompt {
+                    sessions[key]?.interrupted = true
+                }
                 sessions[key]?.status = .idle
                 sessions[key]?.currentTool = nil
                 sessions[key]?.toolDescription = nil
@@ -227,7 +251,7 @@ final class AppState {
         // follow-up hook activity for a long time and there isn't even a live tool/description,
         // reset that silent processing state back to idle.
         let monitoredThinkingTimeout: TimeInterval = 300
-        let nativeAppThinkingTimeout: TimeInterval = 30
+        let ideAppThinkingTimeout: TimeInterval = 30
         let codexTerminalTurnSettleTime: TimeInterval = 3
         for (key, session) in sessions
             where processMonitors[key] != nil
@@ -235,6 +259,7 @@ final class AppState {
             && session.currentTool == nil
             && session.toolDescription == nil {
             let elapsed = -session.lastActivity.timeIntervalSinceNow
+            let isIDECompletionSource = SessionSnapshot.ideCompletionSources.contains(session.source)
             if session.isNativeAppMode,
                elapsed >= codexTerminalTurnSettleTime,
                let finishedAt = Self.nativeAppFinishedTurnTimestamp(sessionId: key, session: session),
@@ -244,11 +269,19 @@ final class AppState {
             }
             // Native apps write transcripts synchronously — if the transcript check above
             // didn't find a stop marker after 30s, the session is almost certainly idle.
-            if session.isNativeAppMode, elapsed > nativeAppThinkingTimeout {
+            // IDE agents (Cursor / Trae / CodeBuddy) may also keep their host app process
+            // alive and omit a Stop hook when the user manually aborts a turn.
+            if (session.isNativeAppMode || isIDECompletionSource), elapsed > ideAppThinkingTimeout {
+                if session.hasUnansweredPrompt {
+                    sessions[key]?.interrupted = true
+                }
                 sessions[key]?.status = .idle
                 continue
             }
             if elapsed > monitoredThinkingTimeout {
+                if session.hasUnansweredPrompt {
+                    sessions[key]?.interrupted = true
+                }
                 sessions[key]?.status = .idle
             }
         }
@@ -299,6 +332,17 @@ final class AppState {
         prunePendingToolUses()
 
         refreshDerivedState()
+    }
+
+    private func hasRuntimeAnchor(_ session: SessionSnapshot) -> Bool {
+        SessionPersistence.hasPersistenceAnchor(session)
+            || session.transcriptPath != nil
+            || session.providerSessionId != nil && (
+                session.lastUserPrompt != nil
+                || session.lastAssistantMessage != nil
+                || session.cwd != nil
+                || session.cliPid != nil
+            )
     }
 
     private nonisolated static func currentPluginSessionMode() -> String {
@@ -1052,7 +1096,7 @@ final class AppState {
         // Extract metadata so blocking-first parent sessions have cwd/source/PID.
         // Subagent events are routed through the parent session ID; their metadata
         // can describe the child session and should not overwrite the parent.
-        if event.agentId == nil {
+        if !event.routesAsSubagent {
             extractMetadata(into: &sessions, sessionId: sessionId, event: event)
         }
         tryMonitorSession(sessionId)
@@ -1246,7 +1290,7 @@ final class AppState {
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
-        if event.agentId == nil {
+        if !event.routesAsSubagent {
             extractMetadata(into: &sessions, sessionId: sessionId, event: event)
         }
         tryMonitorSession(sessionId)
@@ -1278,7 +1322,7 @@ final class AppState {
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
         }
-        if event.agentId == nil {
+        if !event.routesAsSubagent {
             extractMetadata(into: &sessions, sessionId: sessionId, event: event)
         }
         tryMonitorSession(sessionId)
@@ -1931,6 +1975,10 @@ final class AppState {
             snapshot.tmuxClientTty = p.tmuxClientTty
             snapshot.tmuxEnv = p.tmuxEnv
             snapshot.termBundleId = p.termBundleId
+            snapshot.source = SessionSnapshot.sourceCorrectedForNativeBundle(
+                source: snapshot.source,
+                termBundleId: snapshot.termBundleId
+            )
             snapshot.cmuxSurfaceId = p.cmuxSurfaceId
             snapshot.cmuxWorkspaceId = p.cmuxWorkspaceId
             snapshot.zellijPaneId = p.zellijPaneId

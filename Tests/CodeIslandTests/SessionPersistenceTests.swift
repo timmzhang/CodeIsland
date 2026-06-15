@@ -1,7 +1,24 @@
 import XCTest
+import CodeIslandCore
 @testable import CodeIsland
 
 final class SessionPersistenceTests: XCTestCase {
+    func testAnchorlessProviderOnlySessionIsNotPersistable() {
+        var session = SessionSnapshot()
+        session.source = "claude"
+        session.providerSessionId = "6a2fc215933a47979bed2db0"
+
+        XCTAssertFalse(SessionPersistence.hasPersistenceAnchor(session))
+    }
+
+    func testSessionWithCwdIsPersistable() {
+        var session = SessionSnapshot()
+        session.source = "claude"
+        session.cwd = "/tmp/demo"
+
+        XCTAssertTrue(SessionPersistence.hasPersistenceAnchor(session))
+    }
+
     func testPersistedSessionDecodesWithoutCliStartTimeForBackwardCompatibility() throws {
         let json = """
         {
