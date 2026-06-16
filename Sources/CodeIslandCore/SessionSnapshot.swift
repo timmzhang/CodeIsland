@@ -591,6 +591,12 @@ public func reduceEvent(
     // Preserve actionable states: don't let activity updates overwrite waiting states
     let isWaiting = sessions[sessionId]?.status == .waitingApproval
         || sessions[sessionId]?.status == .waitingQuestion
+    // IDE agents (Trae CN etc.) drive waiting states via fire-and-forget
+    // Notification events — there is no AppState permission queue to resolve
+    // them, so their next tool event must be allowed to clear the wait. Hook
+    // CLIs keep the guard so a stray tool event can't dismiss a live card.
+    let isIDEAgent = sessions[sessionId].map { SessionSnapshot.ideCompletionSources.contains($0.source) } ?? false
+    let preserveWaiting = isWaiting && !isIDEAgent
 
     // Update this session's state
     switch eventName {
@@ -619,7 +625,7 @@ public func reduceEvent(
             sessions[sessionId]?.addRecentMessage(ChatMessage(isUser: true, text: prompt))
         }
     case "PreToolUse":
-        if !isWaiting {
+        if !preserveWaiting {
             sessions[sessionId]?.status = .running
             sessions[sessionId]?.currentTool = event.toolName
             sessions[sessionId]?.toolDescription = event.toolDescription
@@ -629,7 +635,7 @@ public func reduceEvent(
             let desc = sessions[sessionId]?.toolDescription
             sessions[sessionId]?.recordTool(tool, description: desc, success: true, agentType: nil, maxHistory: maxHistory)
         }
-        if !isWaiting {
+        if !preserveWaiting {
             sessions[sessionId]?.status = .processing
             sessions[sessionId]?.currentTool = nil
             sessions[sessionId]?.toolDescription = nil
@@ -639,25 +645,25 @@ public func reduceEvent(
             let desc = sessions[sessionId]?.toolDescription
             sessions[sessionId]?.recordTool(tool, description: desc, success: false, agentType: nil, maxHistory: maxHistory)
         }
-        if !isWaiting {
+        if !preserveWaiting {
             sessions[sessionId]?.status = .processing
             sessions[sessionId]?.currentTool = nil
             sessions[sessionId]?.toolDescription = nil
         }
     case "PermissionDenied":
-        if !isWaiting {
+        if !preserveWaiting {
             sessions[sessionId]?.status = .processing
             sessions[sessionId]?.currentTool = nil
             sessions[sessionId]?.toolDescription = nil
         }
     case "SubagentStart":
-        if !isWaiting {
+        if !preserveWaiting {
             sessions[sessionId]?.status = .running
             sessions[sessionId]?.currentTool = "Agent"
             sessions[sessionId]?.toolDescription = event.rawJSON["agent_type"] as? String
         }
     case "SubagentStop":
-        if !isWaiting {
+        if !preserveWaiting {
             sessions[sessionId]?.status = .processing
             sessions[sessionId]?.currentTool = nil
             sessions[sessionId]?.toolDescription = nil
@@ -810,11 +816,42 @@ public func reduceEvent(
             keys: ["message", "text", "summary", "status", "detail"],
             includeNested: true
         )
-        if let msg = notificationText, !msg.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
-            sessions[sessionId]?.toolDescription = msg
-        }
-        if QuestionPayload.from(event: event) != nil {
+        // IDE agents (e.g. Trae CN) signal approval/question gates through a
+        // `notification_type` discriminator rather than a `question` field:
+        //   ask_user_question                 → user must answer    (waitingQuestion)
+        //   document_review / *review / *confirm → user must approve to
+        //                                         continue          (waitingApproval)
+        //   idle_prompt                       → agent finished task (idle)
+        // These notifications are fire-and-forget (the IDE drives its own
+        // approval UI and doesn't block on the hook), so a later tool event
+        // clears the waiting state — see `preserveWaiting` above.
+        let notificationType = (event.rawJSON["notification_type"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch notificationType {
+        case "ask_user_question":
             sessions[sessionId]?.status = .waitingQuestion
+            sessions[sessionId]?.currentTool = nil
+            sessions[sessionId]?.toolDescription = nil
+        case "idle_prompt":
+            sessions[sessionId]?.status = .idle
+            sessions[sessionId]?.currentTool = nil
+            sessions[sessionId]?.toolDescription = nil
+            effects.append(.enqueueCompletion(sessionId: sessionId))
+        case .some(let type) where type.contains("review")
+            || type.contains("confirm")
+            || type.contains("approval")
+            || type.contains("permission"):
+            sessions[sessionId]?.status = .waitingApproval
+            sessions[sessionId]?.currentTool = nil
+            sessions[sessionId]?.toolDescription = nil
+        default:
+            if let msg = notificationText, !msg.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
+                sessions[sessionId]?.toolDescription = msg
+            }
+            if QuestionPayload.from(event: event) != nil {
+                sessions[sessionId]?.status = .waitingQuestion
+            }
         }
     case "PreCompact":
         sessions[sessionId]?.status = .processing

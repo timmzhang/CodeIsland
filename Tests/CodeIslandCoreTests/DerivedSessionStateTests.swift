@@ -175,6 +175,105 @@ final class DerivedSessionStateTests: XCTestCase {
         XCTAssertTrue(effects.contains(.enqueueCompletion(sessionId: "traecn-session")))
     }
 
+    func testTraeDocumentReviewNotificationWaitsForApproval() throws {
+        var session = SessionSnapshot()
+        session.source = "traecn"
+        session.status = .processing
+
+        var sessions = ["traecn-session": session]
+        // Mirrors the real "确认执行 / 文档已生成" payload from Trae CN's agent-hooks log.
+        let notify = try decode([
+            "hook_event_name": "Notification",
+            "session_id": "traecn-session",
+            "_source": "traecn",
+            "agent_id": "solo_agent",
+            "notification_type": "document_review",
+            "message": "Tool 'NotifyUser' requires user confirmation",
+        ])
+        _ = reduceEvent(sessions: &sessions, event: notify, maxHistory: 10)
+        XCTAssertEqual(sessions["traecn-session"]?.status, .waitingApproval)
+        XCTAssertNil(sessions["traecn-session"]?.currentTool)
+
+        // Clicking 执行 resumes the agent — the next tool event clears the wait.
+        let resume = try decode([
+            "hook_event_name": "PreToolUse",
+            "session_id": "traecn-session",
+            "_source": "traecn",
+            "tool_name": "Edit",
+        ])
+        _ = reduceEvent(sessions: &sessions, event: resume, maxHistory: 10)
+        XCTAssertEqual(sessions["traecn-session"]?.status, .running)
+        XCTAssertEqual(sessions["traecn-session"]?.currentTool, "Edit")
+    }
+
+    func testTraeAskUserQuestionNotificationWaitsForQuestion() throws {
+        var session = SessionSnapshot()
+        session.source = "traecn"
+        session.status = .running
+        session.currentTool = "AskUserQuestion"
+
+        var sessions = ["traecn-session": session]
+        let notify = try decode([
+            "hook_event_name": "Notification",
+            "session_id": "traecn-session",
+            "_source": "traecn",
+            "agent_id": "solo_agent",
+            "notification_type": "ask_user_question",
+            "message": "Tool 'AskUserQuestion' requires user confirmation",
+        ])
+        _ = reduceEvent(sessions: &sessions, event: notify, maxHistory: 10)
+        XCTAssertEqual(sessions["traecn-session"]?.status, .waitingQuestion)
+
+        // Answering fires PostToolUse, which clears the wait for IDE agents.
+        let answered = try decode([
+            "hook_event_name": "PostToolUse",
+            "session_id": "traecn-session",
+            "_source": "traecn",
+            "tool_name": "AskUserQuestion",
+        ])
+        _ = reduceEvent(sessions: &sessions, event: answered, maxHistory: 10)
+        XCTAssertEqual(sessions["traecn-session"]?.status, .processing)
+    }
+
+    func testTraeIdlePromptNotificationCompletesSession() throws {
+        var session = SessionSnapshot()
+        session.source = "traecn"
+        session.status = .processing
+
+        var sessions = ["traecn-session": session]
+        let notify = try decode([
+            "hook_event_name": "Notification",
+            "session_id": "traecn-session",
+            "_source": "traecn",
+            "agent_id": "solo_agent",
+            "notification_type": "idle_prompt",
+            "message": "Agent has completed the task",
+        ])
+        let effects = reduceEvent(sessions: &sessions, event: notify, maxHistory: 10)
+        XCTAssertEqual(sessions["traecn-session"]?.status, .idle)
+        XCTAssertTrue(effects.contains(.enqueueCompletion(sessionId: "traecn-session")))
+    }
+
+    func testNonIDEPermissionWaitSurvivesStrayToolEvent() throws {
+        // Claude-style sessions resolve approvals via the AppState permission
+        // queue, so a stray PreToolUse must NOT dismiss a live waiting card.
+        var session = SessionSnapshot()
+        session.source = "claude"
+        session.status = .waitingApproval
+        session.currentTool = "Bash"
+
+        var sessions = ["cli-session": session]
+        let stray = try decode([
+            "hook_event_name": "PreToolUse",
+            "session_id": "cli-session",
+            "_source": "claude",
+            "tool_name": "Read",
+        ])
+        _ = reduceEvent(sessions: &sessions, event: stray, maxHistory: 10)
+        XCTAssertEqual(sessions["cli-session"]?.status, .waitingApproval)
+        XCTAssertEqual(sessions["cli-session"]?.currentTool, "Bash")
+    }
+
     func testAfterAgentResponseKeepsCLISourceProcessing() throws {
         var session = SessionSnapshot()
         session.source = "claude"

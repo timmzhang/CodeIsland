@@ -2137,6 +2137,17 @@ private struct SessionCard: View {
                                     color: .white.opacity(0.75)
                                 )
                                 .truncationMode(.tail)
+                            } else if session.status == .waitingApproval || session.status == .waitingQuestion {
+                                // IDE agents (Trae CN etc.) park here with no tool while
+                                // their own approval/question dialog is open — surface the
+                                // wait instead of an indefinite "thinking" animation.
+                                Text(session.status == .waitingApproval
+                                    ? L10n.shared["waiting_approval"]
+                                    : L10n.shared["status_waiting"])
+                                    .font(.system(size: fontSize, design: .monospaced))
+                                    .foregroundStyle(Color(red: 1.0, green: 0.6, blue: 0.2))
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
                             } else {
                                 TypingIndicator(fontSize: fontSize, label: "thinking")
                             }
