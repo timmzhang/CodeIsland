@@ -596,6 +596,68 @@ final class AppState {
         scheduleSave()
     }
 
+    private func pruneInterruptedDuplicateIDESession(currentSessionId: String, normalizedEventName: String) {
+        guard normalizedEventName == "UserPromptSubmit",
+              let current = sessions[currentSessionId],
+              current.status != .idle,
+              SessionSnapshot.ideCompletionSources.contains(current.source),
+              let prompt = Self.normalizedDuplicatePrompt(current.lastUserPrompt),
+              let cwd = current.cwd else {
+            return
+        }
+
+        let duplicateIds = sessions.compactMap { candidateId, candidate -> String? in
+            guard candidateId != currentSessionId,
+                  candidate.status == .idle || candidate.interrupted,
+                  candidate.source == current.source,
+                  candidate.cwd == cwd,
+                  Self.normalizedDuplicatePrompt(candidate.lastUserPrompt) == prompt,
+                  Self.sameRestartRuntimeAnchor(current, candidate) else {
+                return nil
+            }
+            return candidateId
+        }
+
+        for duplicateId in duplicateIds {
+            removeSession(duplicateId)
+        }
+    }
+
+    private func restoredDuplicateIDESessionId(for current: SessionSnapshot, excluding currentSessionId: String) -> String? {
+        guard SessionSnapshot.ideCompletionSources.contains(current.source),
+              let prompt = Self.normalizedDuplicatePrompt(current.lastUserPrompt),
+              let cwd = current.cwd else {
+            return nil
+        }
+
+        return sessions.first { candidateId, candidate in
+            candidateId != currentSessionId
+                && candidate.source == current.source
+                && candidate.cwd == cwd
+                && Self.normalizedDuplicatePrompt(candidate.lastUserPrompt) == prompt
+                && Self.sameRestartRuntimeAnchor(current, candidate)
+        }?.key
+    }
+
+    private nonisolated static func normalizedDuplicatePrompt(_ prompt: String?) -> String? {
+        guard let prompt else { return nil }
+        let normalized = prompt
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private nonisolated static func sameRestartRuntimeAnchor(_ lhs: SessionSnapshot, _ rhs: SessionSnapshot) -> Bool {
+        if let lhsPid = lhs.cliPid, let rhsPid = rhs.cliPid {
+            return lhsPid == rhsPid
+        }
+        if let lhsBundle = lhs.termBundleId, let rhsBundle = rhs.termBundleId {
+            return lhsBundle == rhsBundle && lhs.isNativeAppMode && rhs.isNativeAppMode
+        }
+        return false
+    }
+
     // MARK: - Compact bar mascot rotation
 
     /// Cached sorted active session IDs — refreshed by refreshActiveIds()
@@ -1020,6 +1082,11 @@ final class AppState {
         for effect in effects {
             executeEffect(effect, sessionId: sessionId)
         }
+
+        pruneInterruptedDuplicateIDESession(
+            currentSessionId: sessionId,
+            normalizedEventName: normalizedEventName
+        )
 
         if let provider = sessions[sessionId]?.source,
            sessions[sessionId]?.isRemote != true,
@@ -1993,6 +2060,12 @@ final class AppState {
                     snapshot.cliPid = pid
                     snapshot.cliStartTime = p.cliStartTime
                 }
+            }
+            if let duplicateId = restoredDuplicateIDESessionId(for: snapshot, excluding: p.sessionId) {
+                if let existing = sessions[duplicateId], existing.lastActivity >= snapshot.lastActivity {
+                    continue
+                }
+                removeSession(duplicateId)
             }
             // Skip sessions whose process is dead and status was idle — nothing to show.
             if snapshot.cliPid == nil && snapshot.status == .idle && snapshot.lastUserPrompt == nil {

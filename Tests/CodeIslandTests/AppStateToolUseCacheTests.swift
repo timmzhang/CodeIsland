@@ -380,6 +380,38 @@ final class AppStateToolUseCacheTests: XCTestCase {
         XCTAssertEqual(appState.activeSessionCount, 0)
     }
 
+    // MARK: - IDE restarted prompt dedupe
+
+    func testUserPromptSubmitPrunesInterruptedDuplicateIDESession() throws {
+        let appState = AppState()
+        var old = SessionSnapshot()
+        old.source = "traecn"
+        old.status = .idle
+        old.interrupted = true
+        old.cwd = "/repo/trae-op"
+        old.termBundleId = "cn.trae.app"
+        old.lastUserPrompt = "参考论坛运营视图，给我增加一个“Gmail 运营视图”。\n刷新按钮"
+        old.lastActivity = Date(timeIntervalSinceNow: -60)
+        appState.sessions["old-session"] = old
+        appState.activeSessionId = "old-session"
+
+        let event = try makeRawHookEvent([
+            "hook_event_name": "beforeSubmitPrompt",
+            "session_id": "new-session",
+            "_source": "trae",
+            "_term_bundle": "cn.trae.app",
+            "cwd": "/repo/trae-op",
+            "prompt": "  参考论坛运营视图，给我增加一个“Gmail 运营视图”。 \n\n 刷新按钮  ",
+        ])
+
+        appState.handleEvent(event)
+
+        XCTAssertNil(appState.sessions["old-session"])
+        XCTAssertEqual(appState.sessions["new-session"]?.source, "traecn")
+        XCTAssertEqual(appState.sessions["new-session"]?.status, .processing)
+        XCTAssertEqual(appState.activeSessionId, "new-session")
+    }
+
     // MARK: - Backfill from cache
 
     func testEnrichBackfillsMissingToolNameFromCache() throws {
