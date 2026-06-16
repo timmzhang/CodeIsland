@@ -412,6 +412,34 @@ final class AppStateToolUseCacheTests: XCTestCase {
         XCTAssertEqual(appState.activeSessionId, "new-session")
     }
 
+    func testSilentIDETimeoutUsesThirtySecondsForAgentState() {
+        var bare = SessionSnapshot()
+        bare.source = "traecn"
+        bare.status = .processing
+
+        XCTAssertEqual(
+            AppState.silentIDETimeoutThreshold(for: bare, bareTimeout: 30, activeAgentTimeout: 30),
+            30
+        )
+
+        var withAgent = bare
+        withAgent.currentTool = "Agent"
+        withAgent.toolDescription = "thinking"
+
+        XCTAssertEqual(
+            AppState.silentIDETimeoutThreshold(for: withAgent, bareTimeout: 30, activeAgentTimeout: 30),
+            30
+        )
+
+        var withSubagent = bare
+        withSubagent.subagents["worker"] = SubagentState(agentId: "worker", agentType: "thinking")
+
+        XCTAssertEqual(
+            AppState.silentIDETimeoutThreshold(for: withSubagent, bareTimeout: 30, activeAgentTimeout: 30),
+            30
+        )
+    }
+
     // MARK: - Backfill from cache
 
     func testEnrichBackfillsMissingToolNameFromCache() throws {

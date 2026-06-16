@@ -98,12 +98,16 @@ struct CodexPermissionRules {
             try fileManager.createDirectory(atPath: rulesDirectory, withIntermediateDirectories: true)
 
             let existing = (try? String(contentsOfFile: rulesPath, encoding: .utf8)) ?? ""
-            if existing.contains(patternLine), existing.contains(#"decision = "allow""#) {
+            let sanitized = Self.sanitizedExistingRules(existing)
+            if Self.containsAllowRule(patternLine: patternLine, in: sanitized) {
+                if sanitized != existing {
+                    try sanitized.write(toFile: rulesPath, atomically: true, encoding: .utf8)
+                }
                 return true
             }
 
-            let separator = existing.isEmpty || existing.hasSuffix("\n") ? "" : "\n"
-            let updated = existing + separator + block
+            let separator = sanitized.isEmpty || sanitized.hasSuffix("\n") ? "" : "\n"
+            let updated = sanitized + separator + block
             try updated.write(toFile: rulesPath, atomically: true, encoding: .utf8)
             return true
         } catch {
@@ -112,26 +116,112 @@ struct CodexPermissionRules {
     }
 
     private static func patternLine(for pattern: [String]) -> String {
-        "pattern = [\(pattern.map(quotedRuleString).joined(separator: ", "))]"
+        "pattern=[\(pattern.map(quotedRuleString).joined(separator: ", "))]"
     }
 
     private static func ruleBlock(for pattern: [String]) -> String {
+        ruleBlock(patternLine: patternLine(for: pattern))
+    }
+
+    private static func ruleBlock(patternLine: String) -> String {
         """
         # Added by CodeIsland when "Always Allow" is clicked for Codex.
-        prefix_rule(
-            \(patternLine(for: pattern)),
-            decision = "allow",
-            justification = "Allowed from CodeIsland Always Allow",
-        )
+        prefix_rule(\(patternLine), decision="allow", justification="Allowed from CodeIsland Always Allow")
 
         """
     }
 
     private static func quotedRuleString(_ value: String) -> String {
-        let escaped = value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
+        var escaped = ""
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\\":
+                escaped += "\\\\"
+            case "\"":
+                escaped += "\\\""
+            case "\n":
+                escaped += "\\n"
+            case "\r":
+                escaped += "\\r"
+            case "\t":
+                escaped += "\\t"
+            default:
+                if scalar.value < 0x20 {
+                    escaped += String(format: "\\u%04X", scalar.value)
+                } else {
+                    escaped.unicodeScalars.append(scalar)
+                }
+            }
+        }
         return "\"\(escaped)\""
+    }
+
+    private static func containsAllowRule(patternLine: String, in contents: String) -> Bool {
+        contents.contains(patternLine)
+            && contents.contains(#"decision="allow""#)
+    }
+
+    private static func sanitizedExistingRules(_ contents: String) -> String {
+        guard !contents.isEmpty else { return contents }
+
+        let lines = contents.components(separatedBy: .newlines)
+        var seenPatterns: Set<String> = []
+        var blocks: [String] = []
+
+        for (index, line) in lines.enumerated() {
+            guard let arrayExpression = patternArrayExpression(in: line) else { continue }
+
+            let lookaheadEnd = min(index + 8, lines.count - 1)
+            let window = lines[index...lookaheadEnd].joined(separator: "\n")
+            let compactWindow = window.filter { !$0.isWhitespace }
+            guard compactWindow.contains(#"decision="allow""#) else { continue }
+
+            let patternLine = "pattern=\(arrayExpression)"
+            guard seenPatterns.insert(patternLine).inserted else { continue }
+            blocks.append(ruleBlock(patternLine: patternLine))
+        }
+
+        return blocks.joined()
+    }
+
+    private static func patternArrayExpression(in line: String) -> String? {
+        guard let patternRange = line.range(of: "pattern"),
+              let equalsIndex = line[patternRange.upperBound...].firstIndex(of: "="),
+              let arrayStart = line[equalsIndex...].firstIndex(of: "[") else {
+            return nil
+        }
+
+        var quote: Character?
+        var escaping = false
+        var depth = 0
+        var index = arrayStart
+
+        while index < line.endIndex {
+            let char = line[index]
+
+            if escaping {
+                escaping = false
+            } else if let activeQuote = quote {
+                if char == "\\" {
+                    escaping = true
+                } else if char == activeQuote {
+                    quote = nil
+                }
+            } else if char == "\"" || char == "'" {
+                quote = char
+            } else if char == "[" {
+                depth += 1
+            } else if char == "]" {
+                depth -= 1
+                if depth == 0 {
+                    return String(line[arrayStart...index])
+                }
+            }
+
+            index = line.index(after: index)
+        }
+
+        return nil
     }
 
     private static func eventReviewerValue(_ rawJSON: [String: Any]) -> String? {

@@ -243,8 +243,8 @@ final class AppStatePermissionFlowTests: XCTestCase {
         XCTAssertNil(decision["updatedPermissions"])
 
         let rules = try readCodeIslandRules(in: codexHome)
-        XCTAssertTrue(rules.contains(#"pattern = ["php", "vendor/bin/phpstan", "analyse"]"#))
-        XCTAssertTrue(rules.contains(#"decision = "allow""#))
+        XCTAssertTrue(rules.contains(#"pattern=["php", "vendor/bin/phpstan", "analyse"]"#))
+        XCTAssertTrue(rules.contains(#"decision="allow""#))
     }
 
     func testCodexAlwaysAllowDoesNotDuplicateExistingCodeIslandRule() throws {
@@ -263,7 +263,74 @@ final class AppStatePermissionFlowTests: XCTestCase {
         XCTAssertTrue(rules.persistAlwaysAllowRule(for: event))
 
         let contents = try readCodeIslandRules(in: codexHome)
-        XCTAssertEqual(contents.components(separatedBy: #"pattern = ["npm", "run", "build"]"#).count - 1, 1)
+        XCTAssertEqual(contents.components(separatedBy: #"pattern=["npm", "run", "build"]"#).count - 1, 1)
+    }
+
+    func testCodexAlwaysAllowEscapesNewlineInRuleString() throws {
+        let codexHome = makeTemporaryCodexHome()
+        defer { try? FileManager.default.removeItem(at: codexHome) }
+
+        let event = try makePermissionRequestEvent(
+            sessionId: "s-codex-newline",
+            toolName: "Bash",
+            toolInput: ["command": "/bin/zsh -lc \"echo one\necho two\""],
+            source: "codex"
+        )
+
+        let rules = CodexPermissionRules()
+        XCTAssertTrue(rules.persistAlwaysAllowRule(for: event))
+
+        let contents = try readCodeIslandRules(in: codexHome)
+        XCTAssertTrue(contents.contains(#""echo one\necho two""#))
+        XCTAssertFalse(contents.contains("echo one\necho two"))
+    }
+
+    func testCodexAlwaysAllowRepairsInvalidExistingRulesFile() throws {
+        let codexHome = makeTemporaryCodexHome()
+        defer { try? FileManager.default.removeItem(at: codexHome) }
+        try FileManager.default.createDirectory(
+            at: codeIslandRulesPath(in: codexHome).deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let brokenRules = """
+        # Added by CodeIsland when "Always Allow" is clicked for Codex.
+        prefix_rule(
+            pattern = ["swift", "test", "--filter"],
+            decision = "allow",
+            justification = "Allowed from CodeIsland Always Allow",
+        )
+        # Added by CodeIsland when "Always Allow" is clicked for Codex.
+        prefix_rule(
+            pattern = ["/bin/zsh", "-lc", "
+        echo broken
+        "],
+            decision = "allow",
+            justification = "Allowed from CodeIsland Always Allow",
+        )
+        # Added by CodeIsland when "Always Allow" is clicked for Codex.
+        prefix_rule(
+            pattern = ["swift", "package", "resolve"],
+            decision = "allow",
+            justification = "Allowed from CodeIsland Always Allow",
+        )
+        """
+        try brokenRules.write(to: codeIslandRulesPath(in: codexHome), atomically: true, encoding: .utf8)
+
+        let event = try makePermissionRequestEvent(
+            sessionId: "s-codex-repair",
+            toolName: "Bash",
+            toolInput: ["command": "swift test --filter AppStateToolUseCacheTests"],
+            source: "codex"
+        )
+
+        let rules = CodexPermissionRules()
+        XCTAssertTrue(rules.persistAlwaysAllowRule(for: event))
+
+        let contents = try readCodeIslandRules(in: codexHome)
+        XCTAssertTrue(contents.contains(#"pattern=["swift", "test", "--filter"]"#))
+        XCTAssertTrue(contents.contains(#"pattern=["swift", "package", "resolve"]"#))
+        XCTAssertFalse(contents.contains("echo broken"))
+        XCTAssertFalse(contents.contains(#"pattern = ["#))
     }
 
     func testCodexAutoReviewConfigDefersPermissionRequestToCodex() throws {

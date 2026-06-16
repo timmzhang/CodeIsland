@@ -246,20 +246,45 @@ final class AppState {
             }
         }
 
-        // 2b. Some CLIs keep their parent process alive across requests, so a missed Stop hook
-        // can leave the UI stuck in bare "thinking" forever after an interrupt. If we've had no
-        // follow-up hook activity for a long time and there isn't even a live tool/description,
-        // reset that silent processing state back to idle.
+        // 2b. Some IDEs keep their host process alive across requests, so a missed Stop hook
+        // can leave the UI stuck in "thinking" forever after an interrupt. IDE agents may
+        // either be bare processing or parked on an Agent/subagent marker.
         let monitoredThinkingTimeout: TimeInterval = 300
         let ideAppThinkingTimeout: TimeInterval = 30
+        let ideAppActiveAgentTimeout: TimeInterval = 30
         let codexTerminalTurnSettleTime: TimeInterval = 3
         for (key, session) in sessions
             where processMonitors[key] != nil
-            && session.status == .processing
-            && session.currentTool == nil
-            && session.toolDescription == nil {
+            && session.status != .idle
+            && session.status != .waitingApproval
+            && session.status != .waitingQuestion {
             let elapsed = -session.lastActivity.timeIntervalSinceNow
             let isIDECompletionSource = SessionSnapshot.ideCompletionSources.contains(session.source)
+
+            if isIDECompletionSource {
+                let threshold = Self.silentIDETimeoutThreshold(
+                    for: session,
+                    bareTimeout: ideAppThinkingTimeout,
+                    activeAgentTimeout: ideAppActiveAgentTimeout
+                )
+                if elapsed > threshold {
+                    if session.hasUnansweredPrompt || session.currentTool == "Agent" || !session.subagents.isEmpty {
+                        sessions[key]?.interrupted = true
+                    }
+                    sessions[key]?.status = .idle
+                    sessions[key]?.currentTool = nil
+                    sessions[key]?.toolDescription = nil
+                    sessions[key]?.subagents.removeAll()
+                    continue
+                }
+            }
+
+            guard session.status == .processing,
+                  session.currentTool == nil,
+                  session.toolDescription == nil else {
+                continue
+            }
+
             if session.isNativeAppMode,
                elapsed >= codexTerminalTurnSettleTime,
                let finishedAt = Self.nativeAppFinishedTurnTimestamp(sessionId: key, session: session),
@@ -269,9 +294,7 @@ final class AppState {
             }
             // Native apps write transcripts synchronously — if the transcript check above
             // didn't find a stop marker after 30s, the session is almost certainly idle.
-            // IDE agents (Cursor / Trae / CodeBuddy) may also keep their host app process
-            // alive and omit a Stop hook when the user manually aborts a turn.
-            if (session.isNativeAppMode || isIDECompletionSource), elapsed > ideAppThinkingTimeout {
+            if session.isNativeAppMode, elapsed > ideAppThinkingTimeout {
                 if session.hasUnansweredPrompt {
                     sessions[key]?.interrupted = true
                 }
@@ -450,6 +473,19 @@ final class AppState {
         case "hermes":      return path.contains("/hermes.app/contents/")
         default:           return false
         }
+    }
+
+    nonisolated static func silentIDETimeoutThreshold(
+        for session: SessionSnapshot,
+        bareTimeout: TimeInterval,
+        activeAgentTimeout: TimeInterval
+    ) -> TimeInterval {
+        if session.currentTool == nil,
+           session.toolDescription == nil,
+           session.subagents.isEmpty {
+            return bareTimeout
+        }
+        return activeAgentTimeout
     }
 
     /// Watch a Claude process for exit — waits a grace period before removing, in case the
