@@ -1271,6 +1271,7 @@ final class AppState {
             responseData = Data(response.utf8)
         } else if always, ClaudePermissionRules.isClaudeEvent(pending.event),
                   let update = ClaudePermissionRules.alwaysAllowUpdate(for: pending.event) {
+            _ = ClaudePermissionRules().persistAlwaysAllowRules(for: pending.event)
             let obj: [String: Any] = [
                 "hookSpecificOutput": [
                     "hookEventName": "PermissionRequest",

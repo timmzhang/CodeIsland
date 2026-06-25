@@ -68,6 +68,20 @@ final class JSONLTailerTests: XCTestCase {
         XCTAssertTrue(result.delta.isEmpty)
     }
 
+    func testScanLinesExtractsClaudePermissionDecisionAttachment() {
+        let line = """
+        {"type":"attachment","attachment":{"type":"hook_permission_decision","decision":"allow","toolUseID":"toolu_native"}}
+        """
+        let result = JSONLTailer.scanLines(Data((line + "\n").utf8))
+
+        XCTAssertEqual(
+            result.delta.permissionDecisions,
+            [TranscriptPermissionDecision(toolUseId: "toolu_native", decision: "allow")]
+        )
+        XCTAssertNil(result.delta.lastUserPrompt)
+        XCTAssertNil(result.delta.lastAssistantMessage)
+    }
+
     // MARK: - extractText
 
     func testExtractTextFromPlainString() {

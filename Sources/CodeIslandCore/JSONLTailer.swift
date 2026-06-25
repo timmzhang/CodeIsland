@@ -1,21 +1,38 @@
 import Foundation
 import Darwin
 
+public struct TranscriptPermissionDecision: Equatable, Sendable {
+    public let toolUseId: String
+    public let decision: String
+
+    public init(toolUseId: String, decision: String) {
+        self.toolUseId = toolUseId
+        self.decision = decision
+    }
+}
+
 /// A delta emitted by `JSONLTailer` whenever the watched transcript grows.
 public struct ConversationTailDelta: Equatable, Sendable {
     public let sessionId: String
     public let lastUserPrompt: String?
     public let lastAssistantMessage: String?
+    public let permissionDecisions: [TranscriptPermissionDecision]
 
-    public init(sessionId: String, lastUserPrompt: String?, lastAssistantMessage: String?) {
+    public init(
+        sessionId: String,
+        lastUserPrompt: String?,
+        lastAssistantMessage: String?,
+        permissionDecisions: [TranscriptPermissionDecision] = []
+    ) {
         self.sessionId = sessionId
         self.lastUserPrompt = lastUserPrompt
         self.lastAssistantMessage = lastAssistantMessage
+        self.permissionDecisions = permissionDecisions
     }
 
     /// A delta only carries signal when at least one field is non-nil.
     public var isEmpty: Bool {
-        lastUserPrompt == nil && lastAssistantMessage == nil
+        lastUserPrompt == nil && lastAssistantMessage == nil && permissionDecisions.isEmpty
     }
 }
 
@@ -187,7 +204,8 @@ public final class JSONLTailer: @unchecked Sendable {
             let delta = ConversationTailDelta(
                 sessionId: watch.sessionId,
                 lastUserPrompt: scan.delta.lastUserPrompt,
-                lastAssistantMessage: scan.delta.lastAssistantMessage
+                lastAssistantMessage: scan.delta.lastAssistantMessage,
+                permissionDecisions: scan.delta.permissionDecisions
             )
             onDelta(delta)
         }
@@ -220,7 +238,12 @@ public final class JSONLTailer: @unchecked Sendable {
         public struct Delta: Equatable {
             public var lastUserPrompt: String?
             public var lastAssistantMessage: String?
-            public var isEmpty: Bool { lastUserPrompt == nil && lastAssistantMessage == nil }
+            public var permissionDecisions: [TranscriptPermissionDecision] = []
+            public var isEmpty: Bool {
+                lastUserPrompt == nil
+                    && lastAssistantMessage == nil
+                    && permissionDecisions.isEmpty
+            }
         }
         public let delta: Delta
         public let trailingFragment: Data
@@ -256,6 +279,19 @@ public final class JSONLTailer: @unchecked Sendable {
         // quirk where `Data.SubSequence.withUnsafeBytes` occasionally surfaces the
         // parent's full buffer rather than the slice's view.
         let lineData = Data(line)
+
+        if lineData.range(of: Data("hook_permission_decision".utf8)) != nil,
+           let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+           let attachment = json["attachment"] as? [String: Any],
+           attachment["type"] as? String == "hook_permission_decision",
+           let toolUseId = (attachment["toolUseID"] as? String)
+                ?? (attachment["toolUseId"] as? String),
+           let decision = attachment["decision"] as? String {
+            delta.permissionDecisions.append(
+                TranscriptPermissionDecision(toolUseId: toolUseId, decision: decision)
+            )
+            return
+        }
 
         // Fast path: realistic Claude transcripts are ~75% tool_use / tool_result /
         // meta rows we don't care about. Skipping the JSON parse for those saves a

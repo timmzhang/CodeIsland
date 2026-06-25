@@ -5,10 +5,12 @@ import CodeIslandCore
 @MainActor
 final class AppStatePermissionFlowTests: XCTestCase {
     private var savedCodexHome: String?
+    private var savedClaudeSettingsPath: String?
 
     override func setUp() {
         super.setUp()
         savedCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
+        savedClaudeSettingsPath = ProcessInfo.processInfo.environment["CODEISLAND_CLAUDE_SETTINGS_PATH"]
     }
 
     override func tearDown() {
@@ -16,6 +18,11 @@ final class AppStatePermissionFlowTests: XCTestCase {
             setenv("CODEX_HOME", savedCodexHome, 1)
         } else {
             unsetenv("CODEX_HOME")
+        }
+        if let savedClaudeSettingsPath {
+            setenv("CODEISLAND_CLAUDE_SETTINGS_PATH", savedClaudeSettingsPath, 1)
+        } else {
+            unsetenv("CODEISLAND_CLAUDE_SETTINGS_PATH")
         }
         super.tearDown()
     }
@@ -285,6 +292,25 @@ final class AppStatePermissionFlowTests: XCTestCase {
     }
 
     func testClaudeAlwaysAllowPromotesNativeSuggestionToGlobalSettings() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let settingsURL = temporaryDirectory.appendingPathComponent("settings.json")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        try FileManager.default.createDirectory(
+            at: temporaryDirectory,
+            withIntermediateDirectories: true
+        )
+        try """
+        {
+          "permissions": {
+            "allow": ["Bash(git status)"],
+            "deny": ["Bash(rm *)"]
+          },
+          "model": "opus"
+        }
+        """.write(to: settingsURL, atomically: true, encoding: .utf8)
+        setenv("CODEISLAND_CLAUDE_SETTINGS_PATH", settingsURL.path, 1)
+
         let appState = AppState()
         let suggestion: [String: Any] = [
             "type": "addRules",
@@ -317,7 +343,29 @@ final class AppStatePermissionFlowTests: XCTestCase {
         XCTAssertEqual(updates.count, 1)
         XCTAssertEqual(updates[0]["destination"] as? String, "userSettings")
         let rules = try XCTUnwrap(updates[0]["rules"] as? [[String: Any]])
-        XCTAssertEqual(rules.first?["ruleContent"] as? String, "pins show *")
+        XCTAssertEqual(
+            rules.compactMap { $0["ruleContent"] as? String },
+            [
+                "pins show *",
+                "python3 ~/.agents/skills/pins/pins.py show *",
+            ]
+        )
+
+        let persistedData = try Data(contentsOf: settingsURL)
+        let persisted = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: persistedData) as? [String: Any]
+        )
+        let permissions = try XCTUnwrap(persisted["permissions"] as? [String: Any])
+        XCTAssertEqual(
+            permissions["allow"] as? [String],
+            [
+                "Bash(git status)",
+                "Bash(pins show *)",
+                "Bash(python3 ~/.agents/skills/pins/pins.py show *)",
+            ]
+        )
+        XCTAssertEqual(permissions["deny"] as? [String], ["Bash(rm *)"])
+        XCTAssertEqual(persisted["model"] as? String, "opus")
     }
 
     func testTraeCNAlwaysAllowPersistsGlobalCommandPrefix() throws {

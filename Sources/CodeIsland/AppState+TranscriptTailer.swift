@@ -21,6 +21,14 @@ extension AppState {
 
     /// Apply an incremental update produced by the tailer. Runs on the main actor.
     func applyTranscriptDelta(_ delta: ConversationTailDelta) {
+        for permissionDecision in delta.permissionDecisions {
+            _ = resolvePermissionFromTranscript(
+                sessionId: delta.sessionId,
+                toolUseId: permissionDecision.toolUseId,
+                decision: permissionDecision.decision
+            )
+        }
+
         guard var session = sessions[delta.sessionId] else { return }
         var mutated = false
 

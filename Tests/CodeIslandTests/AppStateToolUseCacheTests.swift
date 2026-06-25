@@ -203,6 +203,93 @@ final class AppStateToolUseCacheTests: XCTestCase {
         XCTAssertEqual(try behavior(keptResponse), "allow")
     }
 
+    func testClaudeTranscriptAllowDecisionDismissesMatchingPermission() async throws {
+        let appState = AppState()
+        appState.sessions["s1"] = SessionSnapshot()
+        appState.sessions["s1"]?.status = .waitingApproval
+        let pending = try makePermissionEvent(
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: "toolu_native",
+            source: "claude"
+        )
+
+        let responseTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(pending, continuation: cont)
+            }
+        }
+        await Task.yield()
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+
+        appState.applyTranscriptDelta(ConversationTailDelta(
+            sessionId: "s1",
+            lastUserPrompt: nil,
+            lastAssistantMessage: nil,
+            permissionDecisions: [
+                TranscriptPermissionDecision(
+                    toolUseId: "toolu_native",
+                    decision: "allow"
+                )
+            ]
+        ))
+
+        let response = await responseTask.value
+        XCTAssertEqual(try behavior(response), "allow")
+        XCTAssertEqual(appState.permissionQueue.count, 0)
+        XCTAssertEqual(appState.surface, .collapsed)
+    }
+
+    func testClaudeTranscriptDecisionLeavesUnrelatedPermissionVisible() async throws {
+        let appState = AppState()
+        appState.sessions["s1"] = SessionSnapshot()
+        let first = try makePermissionEvent(
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: "toolu_first",
+            source: "claude"
+        )
+        let second = try makePermissionEvent(
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: "toolu_second",
+            source: "claude"
+        )
+
+        let firstTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(first, continuation: cont)
+            }
+        }
+        let secondTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(second, continuation: cont)
+            }
+        }
+        await Task.yield()
+
+        appState.applyTranscriptDelta(ConversationTailDelta(
+            sessionId: "s1",
+            lastUserPrompt: nil,
+            lastAssistantMessage: nil,
+            permissionDecisions: [
+                TranscriptPermissionDecision(
+                    toolUseId: "toolu_first",
+                    decision: "deny"
+                )
+            ]
+        ))
+
+        let firstResponse = await firstTask.value
+        XCTAssertEqual(try behavior(firstResponse), "deny")
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        XCTAssertEqual(appState.permissionQueue.first?.toolUseId, "toolu_second")
+
+        appState.approvePermission()
+        let secondResponse = await secondTask.value
+        XCTAssertEqual(try behavior(secondResponse), "allow")
+    }
+
     // MARK: - issue #147 regression: parallel/plugin tool calls must not deny pending permissions
 
     /// Repro for #147: a Stop (or any non-keepWaiting activity event) arriving

@@ -78,6 +78,43 @@ extension AppState {
         }
     }
 
+    /// Claude records native permission-button decisions in the session transcript.
+    /// Resolve the matching CodeIsland mirror request so the card disappears when
+    /// the user answers in Claude Code instead of in CodeIsland.
+    @discardableResult
+    func resolvePermissionFromTranscript(
+        sessionId: String,
+        toolUseId: String,
+        decision: String
+    ) -> Bool {
+        guard let index = permissionQueue.firstIndex(where: {
+            $0.toolUseId == toolUseId
+                && ($0.event.sessionId ?? "default") == sessionId
+        }) else {
+            return false
+        }
+
+        let pending = permissionQueue.remove(at: index)
+        let behavior = decision.lowercased() == "deny" ? "deny" : "allow"
+        let response = Data(
+            #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"\#(behavior)"}}}"#.utf8
+        )
+        pending.continuation.resume(returning: response)
+        pendingToolUses.removeValue(forKey: toolUseId)
+
+        if sessions[sessionId]?.status == .waitingApproval {
+            sessions[sessionId]?.status = .processing
+            sessions[sessionId]?.currentTool = nil
+            sessions[sessionId]?.toolDescription = nil
+        }
+
+        if index == 0 {
+            showNextPending()
+        }
+        refreshDerivedState()
+        return true
+    }
+
     /// Remove stale cache entries. Called from the cleanup timer tick.
     func prunePendingToolUses(now: Date = Date()) {
         let cutoff = now.addingTimeInterval(-AppState.pendingToolUseTTL)
