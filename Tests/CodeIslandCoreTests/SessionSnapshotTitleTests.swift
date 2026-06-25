@@ -28,6 +28,23 @@ final class SessionSnapshotTitleTests: XCTestCase {
         XCTAssertEqual(snapshot.projectDisplayName, "CodeIsland")
     }
 
+    func testProjectDisplayNamePrefersContainingGitRepository() throws {
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("CodeIslandTests-\(UUID().uuidString)", isDirectory: true)
+        let repo = root.appendingPathComponent("gmail-LarkMail", isDirectory: true)
+        let subdir = repo.appendingPathComponent("backend", isDirectory: true)
+
+        try fm.createDirectory(at: subdir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: repo.appendingPathComponent(".git", isDirectory: true), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        var snapshot = SessionSnapshot()
+        snapshot.cwd = subdir.path
+
+        XCTAssertEqual(snapshot.projectDisplayName, "gmail-LarkMail")
+    }
+
     func testDisplaySessionIdPrefersProviderSessionId() {
         var snapshot = SessionSnapshot()
         snapshot.providerSessionId = "019d6330-beed-7a13-b61e-cacf03d3cefe"

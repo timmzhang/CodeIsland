@@ -338,7 +338,7 @@ struct CodexPermissionRules {
         return nil
     }
 
-    private static func shellPrefix(from command: String, maxTokens: Int) -> [String]? {
+    static func shellPrefix(from command: String, maxTokens: Int) -> [String]? {
         var tokens: [String] = []
         var current = ""
         var quote: Character?

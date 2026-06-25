@@ -1,4 +1,5 @@
 import XCTest
+import CodeIslandCore
 @testable import CodeIsland
 
 final class NotchPanelViewTests: XCTestCase {
@@ -28,8 +29,82 @@ final class NotchPanelViewTests: XCTestCase {
         )
     }
 
+    func testOrderedSessionListIdsPlacesActiveBeforeIdleAndNewestFirst() {
+        let now = Date()
+        var oldIdle = SessionSnapshot(startTime: now.addingTimeInterval(-400))
+        oldIdle.status = .idle
+        oldIdle.lastActivity = now.addingTimeInterval(-300)
+        var newestIdle = SessionSnapshot(startTime: now.addingTimeInterval(-200))
+        newestIdle.status = .idle
+        newestIdle.lastActivity = now.addingTimeInterval(-100)
+        var oldActive = SessionSnapshot(startTime: now.addingTimeInterval(-100))
+        oldActive.status = .processing
+        oldActive.lastActivity = now.addingTimeInterval(-250)
+
+        XCTAssertEqual(
+            orderedSessionListIds([
+                "idle-old": oldIdle,
+                "idle-new": newestIdle,
+                "active-old": oldActive,
+            ]),
+            ["active-old", "idle-new", "idle-old"]
+        )
+    }
+
+    func testOrderedSessionListIdsPrioritizesWaitingPrompts() {
+        let now = Date()
+        var running = SessionSnapshot(startTime: now)
+        running.status = .running
+        running.lastActivity = now
+        var waiting = SessionSnapshot(startTime: now.addingTimeInterval(-100))
+        waiting.status = .waitingApproval
+        waiting.lastActivity = now.addingTimeInterval(-100)
+
+        XCTAssertEqual(
+            orderedSessionListIds([
+                "running": running,
+                "waiting": waiting,
+            ]),
+            ["waiting", "running"]
+        )
+    }
+
+    func testClaudePermissionShowsAlwaysAllowOnlyWithNativeSuggestion() throws {
+        XCTAssertFalse(permissionSupportsAlwaysAllow(try makePermissionEvent(source: "claude")))
+        XCTAssertTrue(permissionSupportsAlwaysAllow(try makePermissionEvent(
+            source: "claude",
+            extraPayload: [
+                "permission_suggestions": [[
+                    "type": "addRules",
+                    "rules": [["toolName": "Bash", "ruleContent": "pins show *"]],
+                    "behavior": "allow",
+                    "destination": "localSettings",
+                ]]
+            ]
+        )))
+        XCTAssertTrue(permissionSupportsAlwaysAllow(try makePermissionEvent(source: "codex")))
+    }
+
     func testShouldTriggerJumpFailureFeedbackWhenAllAttemptsFail() {
         XCTAssertTrue(shouldTriggerJumpFailureFeedback([false, false, false]))
+    }
+
+    private func makePermissionEvent(
+        source: String,
+        extraPayload: [String: Any] = [:]
+    ) throws -> HookEvent {
+        var payload: [String: Any] = [
+            "hook_event_name": "PermissionRequest",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": ["command": "echo test"],
+            "_source": source,
+        ]
+        for (key, value) in extraPayload {
+            payload[key] = value
+        }
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        return try XCTUnwrap(HookEvent(from: data))
     }
 
     func testShouldNotTriggerJumpFailureFeedbackWhenAnyAttemptSucceeds() {

@@ -238,13 +238,129 @@ final class AppStatePermissionFlowTests: XCTestCase {
         await Task.yield()
         appState.approvePermission(always: true)
 
-        let decision = try extractPermissionDecision(from: await responseTask.value)
+        let response = await responseTask.value
+        let decision = try extractPermissionDecision(from: response)
         XCTAssertEqual(decision["behavior"] as? String, "allow")
         XCTAssertNil(decision["updatedPermissions"])
 
         let rules = try readCodeIslandRules(in: codexHome)
         XCTAssertTrue(rules.contains(#"pattern=["php", "vendor/bin/phpstan", "analyse"]"#))
         XCTAssertTrue(rules.contains(#"decision="allow""#))
+    }
+
+    func testClaudePermissionReplayWithToolUseIdReusesAllowDecision() async throws {
+        let appState = AppState()
+        let firstEvent = try makePermissionRequestEvent(
+            sessionId: "s-claude-replay",
+            toolName: "Bash",
+            toolInput: ["command": "pins show p-1reu 2>&1"],
+            source: "claude",
+            extraPayload: ["tool_use_id": "toolu_replay"]
+        )
+
+        let firstResponseTask = Task<Data, Never> {
+            await withCheckedContinuation { continuation in
+                appState.handlePermissionRequest(firstEvent, continuation: continuation)
+            }
+        }
+        await Task.yield()
+        appState.approvePermission()
+        let firstResponse = await firstResponseTask.value
+        XCTAssertEqual(try extractPermissionBehavior(from: firstResponse), "allow")
+        XCTAssertEqual(appState.permissionQueue.count, 0)
+
+        let replayEvent = try makePermissionRequestEvent(
+            sessionId: "s-claude-replay",
+            toolName: "Bash",
+            toolInput: ["command": "pins show p-1reu 2>&1"],
+            source: "claude",
+            extraPayload: ["tool_use_id": "toolu_replay"]
+        )
+        let replayResponse = await withCheckedContinuation { continuation in
+            appState.handlePermissionRequest(replayEvent, continuation: continuation)
+        }
+
+        XCTAssertEqual(try extractPermissionBehavior(from: replayResponse), "allow")
+        XCTAssertEqual(appState.permissionQueue.count, 0)
+    }
+
+    func testClaudeAlwaysAllowPromotesNativeSuggestionToGlobalSettings() async throws {
+        let appState = AppState()
+        let suggestion: [String: Any] = [
+            "type": "addRules",
+            "rules": [[
+                "toolName": "Bash",
+                "ruleContent": "pins show *"
+            ]],
+            "behavior": "allow",
+            "destination": "localSettings"
+        ]
+        let event = try makePermissionRequestEvent(
+            sessionId: "s-claude-always",
+            toolName: "Bash",
+            toolInput: ["command": "pins show p-nza7 2>&1 | head -40"],
+            source: "claude",
+            extraPayload: ["permission_suggestions": [suggestion]]
+        )
+
+        let responseTask = Task<Data, Never> {
+            await withCheckedContinuation { continuation in
+                appState.handlePermissionRequest(event, continuation: continuation)
+            }
+        }
+        await Task.yield()
+        appState.approvePermission(always: true)
+
+        let response = await responseTask.value
+        let decision = try extractPermissionDecision(from: response)
+        let updates = try XCTUnwrap(decision["updatedPermissions"] as? [[String: Any]])
+        XCTAssertEqual(updates.count, 1)
+        XCTAssertEqual(updates[0]["destination"] as? String, "userSettings")
+        let rules = try XCTUnwrap(updates[0]["rules"] as? [[String: Any]])
+        XCTAssertEqual(rules.first?["ruleContent"] as? String, "pins show *")
+    }
+
+    func testTraeCNAlwaysAllowPersistsGlobalCommandPrefix() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let settingsURL = temporaryDirectory.appendingPathComponent("settings.json")
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        try FileManager.default.createDirectory(
+            at: temporaryDirectory,
+            withIntermediateDirectories: true
+        )
+        try """
+        {
+          "editor.wordWrap": "on",
+          "AI.toolcall.v2.command.allowList": "[\\"git\\",\\"rg\\"]"
+        }
+        """.write(to: settingsURL, atomically: true, encoding: .utf8)
+
+        let event = try makePermissionRequestEvent(
+            sessionId: "s-traecn-always",
+            toolName: "Bash",
+            toolInput: ["command": "pins show p-nza7 2>&1 | head -40"],
+            source: "traecn"
+        )
+        let rules = TraeCNPermissionRules(settingsPath: settingsURL.path)
+
+        XCTAssertTrue(rules.persistAlwaysAllowRule(for: event))
+        XCTAssertTrue(rules.persistAlwaysAllowRule(for: event))
+
+        let contents = try String(contentsOf: settingsURL, encoding: .utf8)
+        let rootData = try XCTUnwrap(contents.data(using: .utf8))
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: rootData) as? [String: Any]
+        )
+        let encoded = try XCTUnwrap(root[TraeCNPermissionRules.allowListKey] as? String)
+        let allowListData = try XCTUnwrap(encoded.data(using: .utf8))
+        let allowList = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: allowListData) as? [String]
+        )
+
+        XCTAssertEqual(allowList, ["git", "rg", "pins show"])
+        XCTAssertEqual(root["editor.wordWrap"] as? String, "on")
     }
 
     func testCodexAlwaysAllowDoesNotDuplicateExistingCodeIslandRule() throws {
@@ -412,7 +528,8 @@ final class AppStatePermissionFlowTests: XCTestCase {
         sessionId: String,
         toolName: String,
         toolInput: [String: Any] = ["command": "echo test"],
-        source: String? = nil
+        source: String? = nil,
+        extraPayload: [String: Any] = [:]
     ) throws -> HookEvent {
         var payload: [String: Any] = [
             "hook_event_name": "PermissionRequest",
@@ -422,6 +539,9 @@ final class AppStatePermissionFlowTests: XCTestCase {
         ]
         if let source {
             payload["_source"] = source
+        }
+        for (key, value) in extraPayload {
+            payload[key] = value
         }
         let data = try JSONSerialization.data(withJSONObject: payload)
         guard let event = HookEvent(from: data) else {

@@ -252,7 +252,35 @@ public struct SessionSnapshot: Sendable {
     }
 
     public var projectDisplayName: String {
-        displayName
+        if let repoName = gitRepositoryDisplayName {
+            return repoName
+        }
+        return displayName
+    }
+
+    private var gitRepositoryDisplayName: String? {
+        guard let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty else {
+            return nil
+        }
+        guard let root = Self.gitRepositoryRoot(containing: cwd) else {
+            return nil
+        }
+        let name = (root as NSString).lastPathComponent
+        return name.isEmpty ? nil : name
+    }
+
+    static func gitRepositoryRoot(containing path: String, fileManager: FileManager = .default) -> String? {
+        var current = (path as NSString).standardizingPath
+        while !current.isEmpty && current != "/" {
+            let dotGit = (current as NSString).appendingPathComponent(".git")
+            if fileManager.fileExists(atPath: dotGit) {
+                return current
+            }
+            let parent = (current as NSString).deletingLastPathComponent
+            if parent == current { break }
+            current = parent
+        }
+        return nil
     }
 
     public var isRemote: Bool {

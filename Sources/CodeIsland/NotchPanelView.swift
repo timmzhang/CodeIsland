@@ -8,6 +8,39 @@ enum NotchWidthMetrics {
     }
 }
 
+func orderedSessionListIds(_ sessions: [String: SessionSnapshot]) -> [String] {
+    sessions.sorted { lhs, rhs in
+        let lhsPriority = sessionListStatusPriority(lhs.value.status)
+        let rhsPriority = sessionListStatusPriority(rhs.value.status)
+        if lhsPriority != rhsPriority { return lhsPriority > rhsPriority }
+        if lhs.value.lastActivity != rhs.value.lastActivity {
+            return lhs.value.lastActivity > rhs.value.lastActivity
+        }
+        if lhs.value.startTime != rhs.value.startTime {
+            return lhs.value.startTime > rhs.value.startTime
+        }
+        return lhs.key < rhs.key
+    }
+    .map(\.key)
+}
+
+func permissionSupportsAlwaysAllow(_ event: HookEvent) -> Bool {
+    if ClaudePermissionRules.isClaudeEvent(event) {
+        return !ClaudePermissionRules.suggestions(for: event).isEmpty
+    }
+    return true
+}
+
+private func sessionListStatusPriority(_ status: AgentStatus) -> Int {
+    switch status {
+    case .waitingApproval: return 5
+    case .waitingQuestion: return 4
+    case .running:         return 3
+    case .processing:      return 2
+    case .idle:            return 0
+    }
+}
+
 @MainActor
 struct NotchPanelView: View {
     var appState: AppState
@@ -128,6 +161,7 @@ struct NotchPanelView: View {
                                 session: session,
                                 sessionId: sid,
                                 appState: appState,
+                                showsAlwaysAllow: permissionSupportsAlwaysAllow(pending.event),
                                 onAllow: { appState.approvePermission(always: false) },
                                 onAlwaysAllow: { appState.approvePermission(always: true) },
                                 onDeny: { appState.denyPermission() },
@@ -860,6 +894,7 @@ private struct ApprovalBar: View {
     let session: SessionSnapshot?
     let sessionId: String
     let appState: AppState
+    let showsAlwaysAllow: Bool
     let onAllow: () -> Void
     let onAlwaysAllow: () -> Void
     let onDeny: () -> Void
@@ -934,7 +969,9 @@ private struct ApprovalBar: View {
                 PixelButton(label: L10n.shared["deny"], fg: .white.opacity(0.95), bg: Color(red: 0.45, green: 0.12, blue: 0.12), border: Color(red: 0.7, green: 0.25, blue: 0.25), action: onDeny)
                 PixelButton(label: L10n.shared["dismiss"], fg: .white.opacity(0.95), bg: Color(red: 0.25, green: 0.25, blue: 0.25), border: Color.white.opacity(0.28), action: onDismiss)
                 PixelButton(label: L10n.shared["allow_once"], fg: .white.opacity(0.95), bg: Color(red: 0.16, green: 0.38, blue: 0.18), border: Color(red: 0.28, green: 0.62, blue: 0.32), action: onAllow)
-                PixelButton(label: L10n.shared["always"], fg: .white.opacity(0.95), bg: Color(red: 0.14, green: 0.28, blue: 0.52), border: Color(red: 0.28, green: 0.48, blue: 0.82), action: onAlwaysAllow)
+                if showsAlwaysAllow {
+                    PixelButton(label: L10n.shared["always"], fg: .white.opacity(0.95), bg: Color(red: 0.14, green: 0.28, blue: 0.52), border: Color(red: 0.28, green: 0.48, blue: 0.82), action: onAlwaysAllow)
+                }
             }
             .padding(.horizontal, 14)
         }
@@ -1562,14 +1599,14 @@ private struct SessionListView: View {
             return [("", nil, [only])]
         }
 
-        let sorted = appState.sessions.keys.sorted()
+        let sorted = orderedSessionListIds(appState.sessions)
 
         switch groupingMode {
         case "status":
             let l10n = L10n.shared
             let groups: [(Set<AgentStatus>, String)] = [
-                ([.running], l10n["status_running"]),
                 ([.waitingApproval, .waitingQuestion], l10n["status_waiting"]),
+                ([.running], l10n["status_running"]),
                 ([.processing], l10n["status_processing"]),
                 ([.idle], l10n["status_idle"]),
             ]
@@ -2040,13 +2077,15 @@ private struct SessionCard: View {
                             enabled: isActiveApproval,
                             action: { appState.approvePermission(always: false) }
                         )
-                        inlineActionButton(
-                            L10n.shared["always"],
-                            fg: .white,
-                            bg: Color(red: 0.25, green: 0.55, blue: 0.85),
-                            enabled: isActiveApproval,
-                            action: { appState.approvePermission(always: true) }
-                        )
+                        if permissionSupportsAlwaysAllow(appState.permissionQueue[idx].event) {
+                            inlineActionButton(
+                                L10n.shared["always"],
+                                fg: .white,
+                                bg: Color(red: 0.25, green: 0.55, blue: 0.85),
+                                enabled: isActiveApproval,
+                                action: { appState.approvePermission(always: true) }
+                            )
+                        }
                         inlineActionButton(
                             L10n.shared["deny"],
                             fg: .white,

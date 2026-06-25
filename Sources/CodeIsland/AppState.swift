@@ -140,6 +140,13 @@ final class AppState {
     private var modelReadRetryAt: [String: Date] = [:]
 
     private var dismissedPermissionSessionIds: Set<String> = []
+    private struct RecentPermissionDecision {
+        let responseData: Data
+        let resolvedAt: Date
+        let usedToolUseId: Bool
+    }
+    private var recentPermissionDecisions: [String: RecentPermissionDecision] = [:]
+
     private func nextVisiblePermissionIndex() -> Int? {
         permissionQueue.firstIndex { request in
             let sid = request.event.sessionId ?? "default"
@@ -1204,6 +1211,13 @@ final class AppState {
         }
         tryMonitorSession(sessionId)
 
+        if let replayedResponse = recentPermissionDecision(for: event) {
+            sessions[sessionId]?.status = .running
+            continuation.resume(returning: replayedResponse)
+            refreshDerivedState()
+            return
+        }
+
         // New incoming permission request means session needs user decision again.
         dismissedPermissionSessionIds.remove(sessionId)
 
@@ -1251,6 +1265,22 @@ final class AppState {
             _ = CodexPermissionRules().persistAlwaysAllowRule(for: pending.event)
             let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
             responseData = Data(response.utf8)
+        } else if always, TraeCNPermissionRules.isTraeCNEvent(pending.event) {
+            _ = TraeCNPermissionRules().persistAlwaysAllowRule(for: pending.event)
+            let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
+            responseData = Data(response.utf8)
+        } else if always, ClaudePermissionRules.isClaudeEvent(pending.event),
+                  let update = ClaudePermissionRules.alwaysAllowUpdate(for: pending.event) {
+            let obj: [String: Any] = [
+                "hookSpecificOutput": [
+                    "hookEventName": "PermissionRequest",
+                    "decision": [
+                        "behavior": "allow",
+                        "updatedPermissions": [update]
+                    ] as [String: Any]
+                ] as [String: Any]
+            ]
+            responseData = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
         } else if always {
             let toolName = pending.event.toolName ?? ""
             let obj: [String: Any] = [
@@ -1272,11 +1302,57 @@ final class AppState {
             let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
             responseData = Data(response.utf8)
         }
+        rememberPermissionDecision(responseData, for: pending.event)
         pending.continuation.resume(returning: responseData)
         sessions[sessionId]?.status = .running
 
         showNextPending()
         refreshDerivedState()
+    }
+
+    private func recentPermissionDecision(for event: HookEvent, now: Date = Date()) -> Data? {
+        guard let key = permissionReplayKey(for: event),
+              let decision = recentPermissionDecisions[key] else {
+            return nil
+        }
+
+        let ttl: TimeInterval = decision.usedToolUseId ? 30 : 2
+        guard now.timeIntervalSince(decision.resolvedAt) <= ttl else {
+            recentPermissionDecisions.removeValue(forKey: key)
+            return nil
+        }
+        return decision.responseData
+    }
+
+    private func rememberPermissionDecision(_ responseData: Data, for event: HookEvent) {
+        guard let key = permissionReplayKey(for: event) else { return }
+        recentPermissionDecisions[key] = RecentPermissionDecision(
+            responseData: responseData,
+            resolvedAt: Date(),
+            usedToolUseId: !(event.toolUseId ?? "").isEmpty
+        )
+        let cutoff = Date().addingTimeInterval(-30)
+        recentPermissionDecisions = recentPermissionDecisions.filter { $0.value.resolvedAt >= cutoff }
+    }
+
+    private func permissionReplayKey(for event: HookEvent) -> String? {
+        guard SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) == "claude" else {
+            return nil
+        }
+
+        let sessionId = event.sessionId ?? "default"
+        if let toolUseId = event.toolUseId, !toolUseId.isEmpty {
+            return "claude|\(sessionId)|id|\(toolUseId)"
+        }
+
+        guard let toolName = event.toolName, !toolName.isEmpty else { return nil }
+        let input = event.toolInput ?? [:]
+        guard JSONSerialization.isValidJSONObject(input),
+              let data = try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys]),
+              let serializedInput = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return "claude|\(sessionId)|input|\(toolName)|\(serializedInput)"
     }
 
     func handleBuddyControlCommand(_ command: BuddyControlCommand) {
