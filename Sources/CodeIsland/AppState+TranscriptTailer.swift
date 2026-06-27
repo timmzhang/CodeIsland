@@ -6,7 +6,20 @@ extension AppState {
     /// repeatedly with the same (session, path) pair — the tailer reattaches only
     /// when the path actually changed.
     func attachTranscriptTailerIfNeeded(sessionId: String) {
-        guard let path = sessions[sessionId]?.transcriptPath, !path.isEmpty else { return }
+        guard var session = sessions[sessionId] else { return }
+        if session.transcriptPath == nil,
+           SessionSnapshot.normalizedSupportedSource(session.source) == "claude",
+           let cwd = session.cwd {
+            let providerSessionId = session.providerSessionId ?? sessionId
+            let inferredPath = NSHomeDirectory()
+                + "/.claude/projects/\(cwd.appProjectDirEncoded())/\(providerSessionId).jsonl"
+            if FileManager.default.fileExists(atPath: inferredPath) {
+                session.transcriptPath = inferredPath
+                sessions[sessionId] = session
+            }
+        }
+
+        guard let path = session.transcriptPath, !path.isEmpty else { return }
         if attachedTranscriptPaths[sessionId] == path { return }
         attachedTranscriptPaths[sessionId] = path
         transcriptTailer.attach(sessionId: sessionId, filePath: path)

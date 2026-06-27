@@ -19,6 +19,11 @@ struct PreToolUseRecord {
     let receivedAt: Date
 }
 
+private struct TranscriptToolUse {
+    let toolName: String?
+    let toolInput: [String: Any]?
+}
+
 extension AppState {
     /// TTL for cached PreToolUse records. Generous — tool calls may block on user input
     /// or long-running subprocesses; pruning reclaims memory for aborted/abandoned ids.
@@ -87,25 +92,58 @@ extension AppState {
         toolUseId: String,
         decision: String
     ) -> Bool {
-        guard let index = permissionQueue.firstIndex(where: {
-            $0.toolUseId == toolUseId
-                && ($0.event.sessionId ?? "default") == sessionId
-        }) else {
+        let exactIndex = permissionQueue.firstIndex(where: { $0.toolUseId == toolUseId })
+        let transcriptProviderSessionId = sessions[sessionId]?.providerSessionId ?? sessionId
+        let sessionFallbackIndex = permissionQueue.firstIndex(where: { request in
+            guard ClaudePermissionRules.isClaudeEvent(request.event) else { return false }
+            let requestSessionId = request.event.sessionId ?? "default"
+            let requestProviderSessionId =
+                sessions[requestSessionId]?.providerSessionId ?? requestSessionId
+            return requestSessionId == sessionId
+                || requestSessionId == transcriptProviderSessionId
+                || requestProviderSessionId == sessionId
+                || requestProviderSessionId == transcriptProviderSessionId
+        })
+        let transcriptToolUse = transcriptToolUse(sessionId: sessionId, toolUseId: toolUseId)
+        let inputFallbackIndex = transcriptToolUse.flatMap { toolUse in
+            permissionQueue.firstIndex(where: { request in
+                guard ClaudePermissionRules.isClaudeEvent(request.event) else { return false }
+                return permissionRequest(request.event, matchesTranscriptToolUse: toolUse)
+            })
+        }
+        let singleClaudeFallbackIndex = singleVisibleClaudePermissionIndex()
+
+        guard let index = exactIndex
+                ?? sessionFallbackIndex
+                ?? inputFallbackIndex
+                ?? singleClaudeFallbackIndex
+        else {
+            let queued = permissionQueue.map { item in
+                let sid = item.event.sessionId ?? "nil"
+                let tid = item.toolUseId ?? "nil"
+                let tool = item.event.toolName ?? "nil"
+                return "\(sid):\(tool):\(tid)"
+            }.joined(separator: ",")
+            log.notice("permission transcript decision unmatched trackedSession=\(sessionId, privacy: .public) providerSession=\(transcriptProviderSessionId, privacy: .public) toolUseId=\(toolUseId, privacy: .public) queued=\(queued, privacy: .public)")
             return false
         }
 
         let pending = permissionQueue.remove(at: index)
         let behavior = decision.lowercased() == "deny" ? "deny" : "allow"
+        log.notice("permission transcript decision resolved trackedSession=\(sessionId, privacy: .public) requestSession=\(pending.event.sessionId ?? "nil", privacy: .public) transcriptToolUseId=\(toolUseId, privacy: .public) requestToolUseId=\(pending.toolUseId ?? "nil", privacy: .public) behavior=\(behavior, privacy: .public)")
         let response = Data(
             #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"\#(behavior)"}}}"#.utf8
         )
         pending.continuation.resume(returning: response)
         pendingToolUses.removeValue(forKey: toolUseId)
 
-        if sessions[sessionId]?.status == .waitingApproval {
-            sessions[sessionId]?.status = .processing
-            sessions[sessionId]?.currentTool = nil
-            sessions[sessionId]?.toolDescription = nil
+        let requestSessionId = pending.event.sessionId ?? sessionId
+        for resolvedSessionId in Set([sessionId, requestSessionId]) {
+            if sessions[resolvedSessionId]?.status == .waitingApproval {
+                sessions[resolvedSessionId]?.status = .processing
+                sessions[resolvedSessionId]?.currentTool = nil
+                sessions[resolvedSessionId]?.toolDescription = nil
+            }
         }
 
         if index == 0 {
@@ -113,6 +151,86 @@ extension AppState {
         }
         refreshDerivedState()
         return true
+    }
+
+    private func permissionRequest(
+        _ event: HookEvent,
+        matchesTranscriptToolUse toolUse: TranscriptToolUse
+    ) -> Bool {
+        if let transcriptToolName = toolUse.toolName,
+           let requestToolName = event.toolName,
+           transcriptToolName != requestToolName {
+            return false
+        }
+
+        guard let requestInput = event.toolInput,
+              let transcriptInput = toolUse.toolInput
+        else { return false }
+
+        if NSDictionary(dictionary: requestInput).isEqual(to: transcriptInput) {
+            return true
+        }
+
+        let requestCommand = (requestInput["command"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let transcriptCommand = (transcriptInput["command"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let requestCommand,
+           let transcriptCommand,
+           !requestCommand.isEmpty,
+           requestCommand == transcriptCommand {
+            return true
+        }
+
+        return false
+    }
+
+    private func singleVisibleClaudePermissionIndex() -> Int? {
+        let claudeIndices = permissionQueue.indices.filter { ClaudePermissionRules.isClaudeEvent(permissionQueue[$0].event) }
+        guard claudeIndices.count == 1 else { return nil }
+
+        let index = claudeIndices[0]
+        if permissionQueue.count == 1 {
+            return index
+        }
+
+        if case .approvalCard(let visibleSessionId) = surface {
+            let requestSessionId = permissionQueue[index].event.sessionId ?? "default"
+            let requestProviderSessionId = sessions[requestSessionId]?.providerSessionId ?? requestSessionId
+            if requestSessionId == visibleSessionId || requestProviderSessionId == visibleSessionId {
+                return index
+            }
+        }
+
+        return nil
+    }
+
+    private func transcriptToolUse(sessionId: String, toolUseId: String) -> TranscriptToolUse? {
+        guard let path = attachedTranscriptPaths[sessionId] ?? sessions[sessionId]?.transcriptPath,
+              let contents = try? String(contentsOfFile: path, encoding: .utf8)
+        else { return nil }
+
+        var found: TranscriptToolUse?
+        for line in contents.split(separator: "\n", omittingEmptySubsequences: true)
+            where line.contains(toolUseId) && line.contains(#""tool_use""#) {
+            guard let data = String(line).data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let message = json["message"] as? [String: Any],
+                  let content = message["content"] as? [[String: Any]]
+            else { continue }
+
+            for item in content {
+                guard item["type"] as? String == "tool_use",
+                      item["id"] as? String == toolUseId
+                else { continue }
+
+                found = TranscriptToolUse(
+                    toolName: item["name"] as? String,
+                    toolInput: item["input"] as? [String: Any]
+                )
+            }
+        }
+        return found
     }
 
     /// Remove stale cache entries. Called from the cleanup timer tick.

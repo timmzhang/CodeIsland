@@ -1209,6 +1209,10 @@ final class AppState {
         if !event.routesAsSubagent {
             extractMetadata(into: &sessions, sessionId: sessionId, event: event)
         }
+        if let providerSessionId = event.sessionId, !providerSessionId.isEmpty {
+            sessions[sessionId]?.providerSessionId = providerSessionId
+        }
+        attachTranscriptTailerIfNeeded(sessionId: sessionId)
         tryMonitorSession(sessionId)
 
         if let replayedResponse = recentPermissionDecision(for: event) {

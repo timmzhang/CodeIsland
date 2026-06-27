@@ -290,6 +290,131 @@ final class AppStateToolUseCacheTests: XCTestCase {
         XCTAssertEqual(try behavior(secondResponse), "allow")
     }
 
+    func testClaudeTranscriptDecisionFallsBackToProviderSessionWhenRequestHasNoToolUseId() async throws {
+        let appState = AppState()
+        var tracked = SessionSnapshot()
+        tracked.source = "claude"
+        tracked.providerSessionId = "provider-s1"
+        appState.sessions["tracked-s1"] = tracked
+
+        let pending = try makeHookEvent(
+            name: "PermissionRequest",
+            sessionId: "provider-s1",
+            toolName: "Bash",
+            toolUseId: nil,
+            toolInput: ["command": "echo hi"],
+            source: "claude"
+        )
+        let responseTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(pending, continuation: cont)
+            }
+        }
+        await Task.yield()
+        XCTAssertNil(appState.permissionQueue.first?.toolUseId)
+
+        appState.applyTranscriptDelta(ConversationTailDelta(
+            sessionId: "tracked-s1",
+            lastUserPrompt: nil,
+            lastAssistantMessage: nil,
+            permissionDecisions: [
+                TranscriptPermissionDecision(
+                    toolUseId: "toolu_native_missing_from_hook",
+                    decision: "allow"
+                )
+            ]
+        ))
+
+        let response = await responseTask.value
+        XCTAssertEqual(try behavior(response), "allow")
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+    }
+
+    func testClaudeTranscriptDecisionFallsBackToTranscriptCommandWhenRequestHasNoToolUseId() async throws {
+        let appState = AppState()
+        appState.sessions["tracked-s1"] = SessionSnapshot()
+
+        let command = "grep -n SendUserMailboxMessageReqBody /tmp/model.go"
+        let transcript = """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_native_cmd","name":"Bash","input":{"command":"\(command)","description":"dump Send request body struct and its builder setters"}}]}}
+        {"type":"attachment","attachment":{"type":"hook_permission_decision","decision":"allow","toolUseID":"toolu_native_cmd","hookEvent":"PermissionRequest"}}
+        """
+        let transcriptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("jsonl")
+        try transcript.write(to: transcriptURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: transcriptURL) }
+        appState.attachedTranscriptPaths["tracked-s1"] = transcriptURL.path
+
+        let pending = try makeHookEvent(
+            name: "PermissionRequest",
+            sessionId: "provider-s1",
+            toolName: "Bash",
+            toolUseId: nil,
+            toolInput: ["command": command],
+            source: "claude"
+        )
+        let responseTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(pending, continuation: cont)
+            }
+        }
+        await Task.yield()
+        XCTAssertNil(appState.permissionQueue.first?.toolUseId)
+
+        appState.applyTranscriptDelta(ConversationTailDelta(
+            sessionId: "tracked-s1",
+            lastUserPrompt: nil,
+            lastAssistantMessage: nil,
+            permissionDecisions: [
+                TranscriptPermissionDecision(
+                    toolUseId: "toolu_native_cmd",
+                    decision: "allow"
+                )
+            ]
+        ))
+
+        let response = await responseTask.value
+        XCTAssertEqual(try behavior(response), "allow")
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+    }
+
+    func testClaudeTranscriptDecisionFallsBackToSingleClaudePermission() async throws {
+        let appState = AppState()
+        appState.sessions["s1"] = SessionSnapshot()
+        let pending = try makeHookEvent(
+            name: "PermissionRequest",
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: nil,
+            toolInput: ["command": "echo hi"],
+            source: "claude"
+        )
+        let responseTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(pending, continuation: cont)
+            }
+        }
+        await Task.yield()
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+
+        appState.applyTranscriptDelta(ConversationTailDelta(
+            sessionId: "unknown-transcript-session",
+            lastUserPrompt: nil,
+            lastAssistantMessage: nil,
+            permissionDecisions: [
+                TranscriptPermissionDecision(
+                    toolUseId: "toolu_native_elsewhere",
+                    decision: "allow"
+                )
+            ]
+        ))
+
+        let response = await responseTask.value
+        XCTAssertEqual(try behavior(response), "allow")
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+    }
+
     // MARK: - issue #147 regression: parallel/plugin tool calls must not deny pending permissions
 
     /// Repro for #147: a Stop (or any non-keepWaiting activity event) arriving

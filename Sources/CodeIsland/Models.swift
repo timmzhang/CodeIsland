@@ -4,6 +4,7 @@ import CodeIslandCore
 struct PermissionRequest {
     let event: HookEvent
     let continuation: CheckedContinuation<Data, Never>
+    let receivedAt: Date = Date()
 
     var toolUseId: String? { event.toolUseId }
 }
