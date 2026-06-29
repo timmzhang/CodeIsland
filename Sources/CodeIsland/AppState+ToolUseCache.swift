@@ -45,27 +45,28 @@ extension AppState {
     }
 
     /// Drop cache entries for a completed tool invocation. If a PermissionRequest for the
-    /// same id is still sitting in the queue (e.g. agent moved on after a local timeout),
-    /// drain it with a deny so we don't hold the UI hostage to a dead waiter.
+    /// same id is still sitting in the queue (e.g. agent moved on after a local timeout,
+    /// or the user answered Claude's native prompt instead of our card), drain it with a
+    /// deny so we don't hold the UI hostage to a dead waiter.
     func resolveToolUseIfCompleted(_ event: HookEvent) {
         let normalized = EventNormalizer.normalize(event.eventName)
         guard normalized == "PostToolUse"
                 || normalized == "PostToolUseFailure"
                 || normalized == "PermissionDenied"
         else { return }
-        guard let toolUseId = event.toolUseId, !toolUseId.isEmpty else { return }
 
-        pendingToolUses.removeValue(forKey: toolUseId)
+        if let toolUseId = event.toolUseId, !toolUseId.isEmpty {
+            pendingToolUses.removeValue(forKey: toolUseId)
+        }
 
-        guard let staleIndex = permissionQueue.firstIndex(where: { $0.toolUseId == toolUseId })
-        else { return }
+        guard let staleIndex = stalePermissionQueueIndex(for: event) else { return }
 
         if shouldKeepQueuedPermissionForCompletedEvent(event, normalizedEventName: normalized) {
             return
         }
 
         let stale = permissionQueue.remove(at: staleIndex)
-        log.notice("⚠️ permission deny reason=resolveToolUseIfCompleted session=\(stale.event.sessionId ?? "nil", privacy: .public) toolUseId=\(toolUseId, privacy: .public) tool=\(stale.event.toolName ?? "nil", privacy: .public) triggerEvent=\(normalized, privacy: .public)")
+        log.notice("⚠️ permission deny reason=resolveToolUseIfCompleted session=\(stale.event.sessionId ?? "nil", privacy: .public) toolUseId=\(event.toolUseId ?? "nil", privacy: .public) tool=\(stale.event.toolName ?? "nil", privacy: .public) triggerEvent=\(normalized, privacy: .public)")
         let denyBody = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#
         stale.continuation.resume(returning: Data(denyBody.utf8))
 
@@ -81,6 +82,65 @@ extension AppState {
                 showNextPending()
             }
         }
+    }
+
+    /// Locate the queued permission made moot by a completion event.
+    ///
+    /// First tries an exact `tool_use_id` match (providers that echo the id on both the
+    /// PermissionRequest and the PostToolUse). Claude Code's PermissionRequest payload
+    /// omits `tool_use_id` entirely, so its queued cards carry no id to match — the user
+    /// answering Claude's *native* prompt would otherwise leave our mirror card stranded.
+    /// For Claude we therefore fall back to correlating by (session, tool name, tool input),
+    /// which is precise enough to avoid draining a *different* parallel tool call (#147/#169).
+    private func stalePermissionQueueIndex(for event: HookEvent) -> Int? {
+        if let toolUseId = event.toolUseId, !toolUseId.isEmpty,
+           let exact = permissionQueue.firstIndex(where: { $0.toolUseId == toolUseId }) {
+            return exact
+        }
+
+        guard ClaudePermissionRules.isClaudeEvent(event) else { return nil }
+        let sessionId = event.sessionId ?? "default"
+        return permissionQueue.firstIndex { request in
+            guard ClaudePermissionRules.isClaudeEvent(request.event) else { return false }
+            guard (request.event.sessionId ?? "default") == sessionId else { return false }
+            return permissionRequest(request.event, matchesCompletion: event)
+        }
+    }
+
+    /// True when a queued permission request describes the same tool invocation that
+    /// `completion` (a PostToolUse / PostToolUseFailure / PermissionDenied) just reported.
+    /// Mirrors the transcript matcher: identical input dictionaries, or an identical
+    /// trimmed `command` for shell tools.
+    private func permissionRequest(
+        _ request: HookEvent,
+        matchesCompletion completion: HookEvent
+    ) -> Bool {
+        if let requestTool = request.toolName,
+           let completionTool = completion.toolName,
+           requestTool != completionTool {
+            return false
+        }
+
+        guard let requestInput = request.toolInput,
+              let completionInput = completion.toolInput
+        else { return false }
+
+        if NSDictionary(dictionary: requestInput).isEqual(to: completionInput) {
+            return true
+        }
+
+        let requestCommand = (requestInput["command"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let completionCommand = (completionInput["command"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let requestCommand,
+           let completionCommand,
+           !requestCommand.isEmpty,
+           requestCommand == completionCommand {
+            return true
+        }
+
+        return false
     }
 
     /// Claude records native permission-button decisions in the session transcript.

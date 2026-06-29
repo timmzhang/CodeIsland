@@ -12,7 +12,7 @@ extension AppState {
            let cwd = session.cwd {
             let providerSessionId = session.providerSessionId ?? sessionId
             let inferredPath = NSHomeDirectory()
-                + "/.claude/projects/\(cwd.appProjectDirEncoded())/\(providerSessionId).jsonl"
+                + "/.claude/projects/\(cwd.claudeProjectDirEncoded())/\(providerSessionId).jsonl"
             if FileManager.default.fileExists(atPath: inferredPath) {
                 session.transcriptPath = inferredPath
                 sessions[sessionId] = session

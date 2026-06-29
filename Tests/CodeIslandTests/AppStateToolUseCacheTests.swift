@@ -203,6 +203,86 @@ final class AppStateToolUseCacheTests: XCTestCase {
         XCTAssertEqual(try behavior(keptResponse), "allow")
     }
 
+    /// Claude's PermissionRequest payload omits `tool_use_id`, so the queued card has
+    /// no id. When the user answers Claude's *native* prompt, the tool runs and fires a
+    /// PostToolUse that *does* carry an id but matching tool input. The mirror card must
+    /// be drained by the (session, tool, input) fallback rather than stranded.
+    func testNativeClaudeApprovalDrainsIdlessPermissionViaPostToolUse() async throws {
+        let appState = AppState()
+        appState.sessions["s1"] = SessionSnapshot()
+        appState.sessions["s1"]?.status = .waitingApproval
+        let pending = try makeHookEvent(
+            name: "PermissionRequest",
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: nil,
+            toolInput: ["command": "grep -rn foo ."],
+            source: "claude"
+        )
+
+        let responseTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(pending, continuation: cont)
+            }
+        }
+        await Task.yield()
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        XCTAssertNil(appState.permissionQueue.first?.toolUseId)
+
+        appState.handleEvent(try makeHookEvent(
+            name: "PostToolUse",
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: "toolu_native_only",
+            toolInput: ["command": "grep -rn foo ."],
+            source: "claude"
+        ))
+
+        let response = await responseTask.value
+        XCTAssertEqual(try behavior(response), "deny")
+        XCTAssertEqual(appState.permissionQueue.count, 0)
+    }
+
+    /// The (session, tool, input) fallback must stay precise: a PostToolUse for a
+    /// *different* command in the same Claude session must not drain the pending card
+    /// (parallel tool calls — #147/#169).
+    func testPostToolUseWithDifferentInputLeavesClaudePermission() async throws {
+        let appState = AppState()
+        appState.sessions["s1"] = SessionSnapshot()
+        let pending = try makeHookEvent(
+            name: "PermissionRequest",
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: nil,
+            toolInput: ["command": "rm -rf /tmp/a"],
+            source: "claude"
+        )
+
+        let responseTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(pending, continuation: cont)
+            }
+        }
+        await Task.yield()
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+
+        appState.handleEvent(try makeHookEvent(
+            name: "PostToolUse",
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: "toolu_other",
+            toolInput: ["command": "ls -la"],
+            source: "claude"
+        ))
+
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        await assertTaskNotResolved(responseTask)
+
+        appState.approvePermission()
+        let response = await responseTask.value
+        XCTAssertEqual(try behavior(response), "allow")
+    }
+
     func testClaudeTranscriptAllowDecisionDismissesMatchingPermission() async throws {
         let appState = AppState()
         appState.sessions["s1"] = SessionSnapshot()
