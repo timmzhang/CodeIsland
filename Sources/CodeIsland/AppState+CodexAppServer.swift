@@ -117,6 +117,10 @@ extension AppState {
             applyCodexThreadStatusNotification(params: params)
         case "thread/closed":
             applyCodexThreadClosedNotification(params: params)
+        case "thread/tokenUsage/updated":
+            codexUsageProvider?.ingestTokenUsage(params: params)
+        case "thread/settings/updated":
+            codexUsageProvider?.noteThreadSettings(params: params)
         default:
             break
         }
