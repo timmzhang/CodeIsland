@@ -112,6 +112,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // no-ops for Homebrew-installed builds (brew owns those upgrades).
         UpdateChecker.shared.start()
 
+        // Usage stats: open the SQLite store, rescan transcripts (dedup keys
+        // make the rescan idempotent), start live tailing, and keep pushing
+        // today's snapshot to the notch L1 surfaces. Skipped in --preview
+        // builds, which return above after injecting a canned snapshot (the
+        // stats window then keeps its sample-data provider too).
+        UsageManager.shared.start()
+        UsageStatsWindowController.shared.provider = UsageStoreStatsProvider(
+            activeSessionCount: { [weak appState] in
+                let state = appState
+                return await MainActor.run { state?.sessions.count ?? 0 }
+            }
+        )
+
         SoundManager.shared.playBoot()
         setupGlobalShortcut()
 
@@ -134,6 +147,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         hookRecoveryTimer?.invalidate()
         teardownGlobalShortcut()
+        UsageManager.shared.stop()
         appState.saveSessions()
         RemoteManager.shared.shutdown()
         hookServer?.stop()
