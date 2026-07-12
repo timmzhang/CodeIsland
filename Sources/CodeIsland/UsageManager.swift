@@ -18,6 +18,7 @@ final class UsageManager: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "com.codeisland.usage-manager", qos: .utility)
     private let claudeProvider = ClaudeUsageProvider()
+    private let codexProvider = CodexUsageProvider()
     private var store: UsageStore?
     private var started = false
     private var refreshPending = false
@@ -49,10 +50,13 @@ final class UsageManager: @unchecked Sendable {
             // Tail before backfilling so no live event can fall in between;
             // overlap is harmless (dedup keys).
             claudeProvider.startTailing(sink: sink)
-            claudeProvider.backfill(sink: sink) { [weak self] in
+            codexProvider.startTailing(sink: sink)
+            let backfillDone: () -> Void = { [weak self] in
                 guard let self else { return }
                 self.queue.async { self.pushSnapshot() }
             }
+            claudeProvider.backfill(sink: sink, completion: backfillDone)
+            codexProvider.backfill(sink: sink, completion: backfillDone)
             startRolloverTimer()
         }
     }
@@ -60,6 +64,7 @@ final class UsageManager: @unchecked Sendable {
     func stop() {
         queue.async { [self] in
             claudeProvider.stopTailing()
+            codexProvider.stopTailing()
             rolloverTimer?.cancel()
             rolloverTimer = nil
         }
@@ -69,6 +74,16 @@ final class UsageManager: @unchecked Sendable {
     /// tailer (see `AppState.applyTranscriptDelta`).
     func ingestClaude(_ events: [ClaudeUsageEvent]) {
         claudeProvider.ingest(events)
+    }
+
+    /// Entry points for Codex app-server notifications
+    /// (see `AppState.handleCodexAppServerMessage`).
+    func ingestCodexTokenUsage(params: [String: AnyCodableLike]) {
+        codexProvider.ingestTokenUsage(params: params)
+    }
+
+    func noteCodexThreadSettings(params: [String: AnyCodableLike]) {
+        codexProvider.noteThreadSettings(params: params)
     }
 
     /// Store handle for ad-hoc readers (the stats window provider). Nil

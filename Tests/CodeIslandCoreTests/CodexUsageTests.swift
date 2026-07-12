@@ -22,7 +22,7 @@ final class CodexUsageTests: XCTestCase {
         XCTAssertEqual(event?.cumulativeTotalTokens, 26_280)
         XCTAssertEqual(
             event?.timestamp,
-            ClaudeUsageEvent.parseTimestamp("2026-04-29T07:06:09.213Z")
+            CodexUsageEvent.parseTimestamp("2026-04-29T07:06:09.213Z")
         )
     }
 
@@ -84,13 +84,13 @@ final class CodexUsageTests: XCTestCase {
         // their timestamps to the fork moment — only the counters survive.
         let original = CodexUsageEvent(
             sessionId: "original", model: "gpt-5.5",
-            timestamp: ClaudeUsageEvent.parseTimestamp("2026-05-07T02:30:33.206Z"),
+            timestamp: CodexUsageEvent.parseTimestamp("2026-05-07T02:30:33.206Z"),
             last: CodexTokenCounts(inputTokens: 27_000, cachedInputTokens: 0, outputTokens: 755, totalTokens: 27_755),
             cumulativeTotalTokens: 27_755
         )
         let forkCopy = CodexUsageEvent(
             sessionId: "forked", model: "gpt-5.5",
-            timestamp: ClaudeUsageEvent.parseTimestamp("2026-05-08T07:32:29.723Z"),
+            timestamp: CodexUsageEvent.parseTimestamp("2026-05-08T07:32:29.723Z"),
             last: original.last,
             cumulativeTotalTokens: 27_755
         )
@@ -388,6 +388,35 @@ final class CodexUsageProviderTests: XCTestCase {
             params: tokenUsageParams(threadId: uuid, total: 300, input: 120, cached: 0, output: 30)
         )
         XCTAssertEqual(collected.all.last?.model, "gpt-5.4")
+    }
+
+    func testBackfillSeedDoesNotOverwriteLiveSettingsModel() throws {
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try writeRollout(
+            in: root, name: "rollout-2026-04-29T15-05-17-\(uuid).jsonl",
+            lines: [
+                sessionMeta(id: uuid),
+                turnContext(model: "gpt-5.4"),
+                tokenCount(total: 150, input: 100, cached: 0, output: 50),
+            ]
+        )
+
+        let provider = CodexUsageProvider(sessionsRoot: root)
+        provider.noteThreadSettings(params: [
+            "threadId": .string(uuid),
+            "threadSettings": .object(["model": .string("gpt-5.9")]),
+        ])
+        let done = expectation(description: "backfill completes")
+        provider.backfill(sink: { _ in }, completion: { done.fulfill() })
+        wait(for: [done], timeout: 5)
+
+        let collected = Collected<UsageEvent>()
+        provider.startTailing(sink: { collected.append($0) })
+        provider.ingestTokenUsage(
+            params: tokenUsageParams(threadId: uuid, total: 300, input: 120, cached: 0, output: 30)
+        )
+        XCTAssertEqual(collected.all.last?.model, "gpt-5.9")
     }
 
     // MARK: - Fixtures

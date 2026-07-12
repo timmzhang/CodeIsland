@@ -97,10 +97,6 @@ final class AppState {
     /// NSWorkspace launch/terminate observers tracking Codex Desktop.
     @ObservationIgnored
     var codexAppServerObservers: [NSObjectProtocol]?
-    /// Sink for Codex token-usage telemetry; nil until the usage pipeline
-    /// wires it at startup, which keeps notification routing a no-op.
-    @ObservationIgnored
-    var codexUsageProvider: CodexUsageProvider?
 
     /// Computed: first item in permission queue (backward compat for UI reads)
     var pendingPermission: PermissionRequest? { permissionQueue.first }

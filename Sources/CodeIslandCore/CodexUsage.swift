@@ -56,6 +56,7 @@ extension AnyCodableLike {
         switch self {
         case .int(let n): return n
         case .double(let d): return Int64(d)
+        case .string(let s): return Int64(s)  // some JSON-RPC producers stringify int64
         default: return nil
         }
     }
@@ -160,21 +161,17 @@ public final class CodexUsageDeduplicator: @unchecked Sendable {
         defer { lock.unlock() }
         return seen.insert(event.dedupKey).inserted
     }
-
-    public var count: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return seen.count
-    }
 }
 
 /// One-shot full-history scan of Codex rollout files
 /// (`~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`) for usage
 /// backfill. Lines are prefiltered on byte probes so the JSON parser only
-/// runs on candidate rows; files are processed oldest-first with bounded
-/// concurrency, so a fork's copied history normally dedups against the
-/// original file rather than the other way around (which would misbucket the
-/// copies at the rewritten fork-moment timestamps).
+/// runs on candidate rows; files are processed strictly oldest-first
+/// (concurrency defaults to 1) so a fork's copied history always dedups
+/// against the original file rather than the other way around — the copies
+/// carry rewritten fork-moment timestamps, so letting them win would
+/// misbucket that history. Raise `concurrency` only where that attribution
+/// doesn't matter.
 public enum CodexUsageBackfill {
     public struct Summary: Equatable, Sendable {
         public var filesScanned: Int
@@ -214,7 +211,7 @@ public enum CodexUsageBackfill {
     /// worker threads, possibly concurrently — the handler must be thread-safe).
     public static func scan(
         sessionsRoot: URL,
-        concurrency: Int = 4,
+        concurrency: Int = 1,
         deduplicator: CodexUsageDeduplicator = CodexUsageDeduplicator(),
         onFileEvents: @escaping @Sendable (URL, [CodexUsageEvent]) -> Void
     ) -> Summary {
@@ -345,7 +342,7 @@ public enum CodexUsageBackfill {
             return
         }
 
-        if lineData.range(of: sessionMetaMarker) != nil, state.sessionId == nil {
+        if state.sessionId == nil, lineData.range(of: sessionMetaMarker) != nil {
             guard let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                   json["type"] as? String == "session_meta",
                   let payload = json["payload"] as? [String: Any],

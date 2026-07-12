@@ -52,7 +52,7 @@ public final class CodexUsageProvider: UsageProvider, @unchecked Sendable {
 
     public init(
         sessionsRoot: URL = CodexUsageBackfill.defaultSessionsRoot,
-        concurrency: Int = 4,
+        concurrency: Int = 1,  // strictly oldest-first, see CodexUsageBackfill
         queue: DispatchQueue = DispatchQueue.global(qos: .utility)
     ) {
         self.sessionsRoot = sessionsRoot
@@ -68,7 +68,9 @@ public final class CodexUsageProvider: UsageProvider, @unchecked Sendable {
                 deduplicator: deduplicator
             ) { [weak self] _, events in
                 if let last = events.last, let model = last.model {
-                    self?.noteThreadModel(threadId: last.sessionId, model: model)
+                    // Seed only: a live settings notification may already have
+                    // recorded a fresher model than this historical file's.
+                    self?.noteThreadModel(threadId: last.sessionId, model: model, overwrite: false)
                 }
                 sink(events.map { $0.normalized() })
             }
@@ -124,12 +126,14 @@ public final class CodexUsageProvider: UsageProvider, @unchecked Sendable {
               let model = params["threadSettings"]?.asObject?["model"]?.asString,
               !model.isEmpty
         else { return }
-        noteThreadModel(threadId: threadId, model: model)
+        noteThreadModel(threadId: threadId, model: model, overwrite: true)
     }
 
-    private func noteThreadModel(threadId: String, model: String) {
+    private func noteThreadModel(threadId: String, model: String, overwrite: Bool) {
         lock.lock()
-        threadModels[threadId] = model
+        if overwrite || threadModels[threadId] == nil {
+            threadModels[threadId] = model
+        }
         lock.unlock()
     }
 }
