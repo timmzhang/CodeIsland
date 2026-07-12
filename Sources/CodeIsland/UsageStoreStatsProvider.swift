@@ -16,10 +16,11 @@ struct UsageStoreStatsProvider: UsageStatsProviding {
         }
         let sessions = await activeSessionCount()
         let now = Date()
+        let priceTable = UsagePriceTable.fromSettings()
         // Store queries serialize on the store's internal queue — keep the
         // wait off the main actor.
         return try await Task.detached(priority: .userInitiated) {
-            try Self.snapshot(store: store, now: now, activeSessions: sessions)
+            try Self.snapshot(store: store, now: now, activeSessions: sessions, priceTable: priceTable)
         }.value
     }
 
@@ -30,7 +31,8 @@ struct UsageStoreStatsProvider: UsageStatsProviding {
         now: Date,
         activeSessions: Int,
         calendar: Calendar = .current,
-        timeZone: TimeZone = .current
+        timeZone: TimeZone = .current,
+        priceTable: UsagePriceTable = UsagePriceTable()
     ) throws -> UsageStatsSnapshot {
         let dayKeyFormatter = DateFormatter()
         dayKeyFormatter.locale = Locale(identifier: "en_US_POSIX")
@@ -66,7 +68,13 @@ struct UsageStoreStatsProvider: UsageStatsProviding {
                 }
             }
         }
-        // equivalentCostToday / costWeekToDate stay nil until pricing (P2)
+        // Equivalent API cost (design decision #2): computed per tool × model
+        // row so each model bills at its own price. Nil when everything that
+        // ran today is unpriced — the tile shows "—" instead of a false $0.
+        let todayInterval = UsageStore.dayInterval(containing: now, calendar: calendar)
+        summary.equivalentCostToday = displayCost(
+            priceTable.cost(of: try store.totalsByToolAndModel(in: todayInterval))
+        )
         summary.activeSessions = activeSessions
 
         // Daily buckets (last 7 days) --------------------------------------
@@ -131,7 +139,9 @@ struct UsageStoreStatsProvider: UsageStatsProviding {
             // ids (tool|model) stay unique.
             var detailKeys: [String] = []
             var detailTotals: [String: (tool: UsageTool, model: String, totals: UsageTotals)] = [:]
-            for row in try store.totalsByToolAndModel(in: currentWeek) {
+            let weekRows = try store.totalsByToolAndModel(in: currentWeek)
+            snapshot.summary.costWeekToDate = displayCost(priceTable.cost(of: weekRows))
+            for row in weekRows {
                 let tool = UsageTool(toolIdentifier: row.tool)
                 let key = "\(tool.rawValue)|\(row.model)"
                 if var existing = detailTotals[key] {
@@ -154,15 +164,29 @@ struct UsageStoreStatsProvider: UsageStatsProviding {
                         output: Int(entry.totals.outputTokens),
                         cacheWrite: Int(entry.totals.cacheWriteTokens),
                         cacheRead: Int(entry.totals.cacheReadTokens),
-                        cost: nil,
+                        cost: priceTable.cost(of: entry.totals, model: entry.model),
                         share: weekChartTotal > 0
                             ? Double(entry.totals.chartTokens) / Double(weekChartTotal)
                             : 0
                     )
                 }
                 .sorted { ($0.input + $0.output) > ($1.input + $1.output) }
+
+            // Top rankings (current week to date) ---------------------------
+            snapshot.topProjects = UsageRankingBuilder.projectRows(
+                try store.totalsByProject(in: currentWeek).map {
+                    (project: $0.project, tokens: Int($0.totals.chartTokens))
+                }
+            )
+            snapshot.topTools = UsageRankingBuilder.toolRows(fromDetail: snapshot.detailRows)
         }
 
         return snapshot
+    }
+
+    /// Cost for display: nil (rendered "—") when the only usage is unpriced,
+    /// so an unknown model reads as "unknown" rather than a false $0.
+    private static func displayCost(_ cost: UsageCost) -> Double? {
+        cost.usd > 0 || cost.unpricedChartTokens == 0 ? cost.usd : nil
     }
 }

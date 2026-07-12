@@ -132,7 +132,15 @@ final class UsageManager: @unchecked Sendable {
         let now = Date()
         do {
             let rows = try store.totalsByDayAndTool(in: UsageStore.trailingDaysInterval(days: 7, endingAt: now))
-            let snapshot = Self.todaySnapshot(from: rows, dayKeys: Self.trailingDayKeys(days: 7, endingAt: now))
+            var snapshot = Self.todaySnapshot(from: rows, dayKeys: Self.trailingDayKeys(days: 7, endingAt: now))
+            // Equivalent API cost for the badge, per tool × model row so each
+            // model bills at its own price; nil when today's usage is all
+            // unpriced (the badge omits the cost segment).
+            let todayCost = UsagePriceTable.fromSettings()
+                .cost(of: try store.totalsByToolAndModel(in: UsageStore.dayInterval(containing: now)))
+            if todayCost.usd > 0 || todayCost.unpricedChartTokens == 0 {
+                snapshot.equivalentCostUSD = todayCost.usd
+            }
             Task { @MainActor in
                 UsageStatsModel.shared.update(snapshot)
             }

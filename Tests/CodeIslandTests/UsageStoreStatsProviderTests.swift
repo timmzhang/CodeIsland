@@ -20,12 +20,13 @@ final class UsageStoreStatsProviderTests: XCTestCase {
 
     private func event(
         tool: String = "claude-code", model: String = "claude-fable-5",
+        project: String = "",
         daysAgo: Int = 0, hoursAgo: Int = 0,
         input: Int64 = 0, output: Int64 = 0, cacheRead: Int64 = 0, cacheWrite: Int64 = 0,
         dedupKey: String
     ) -> UsageEvent {
         UsageEvent(
-            tool: tool, sessionId: "s", model: model,
+            tool: tool, sessionId: "s", model: model, project: project,
             timestamp: now.addingTimeInterval(TimeInterval(-daysAgo * 86_400 - hoursAgo * 3_600)),
             inputTokens: input, outputTokens: output,
             cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite,
@@ -76,8 +77,11 @@ final class UsageStoreStatsProviderTests: XCTestCase {
         XCTAssertEqual(snapshot.summary.cacheWriteTokens, 50)
         XCTAssertEqual(snapshot.summary.activeSessions, 5)
         XCTAssertEqual(snapshot.summary.activeToolCount, 2)
-        XCTAssertNil(snapshot.summary.equivalentCostToday)
-        XCTAssertNil(snapshot.summary.costWeekToDate)
+        // fable-5 today: (100×10 + 400×50 + 50×12.5 + 9500×1.0) / 1e6 = 0.031125
+        // gpt-5-codex today: (40×1.25 + 60×10) / 1e6 = 0.00065
+        XCTAssertEqual(snapshot.summary.equivalentCostToday!, 0.031775, accuracy: 1e-9)
+        // The gregorian current week (07-12 Sun onward) holds only today's events.
+        XCTAssertEqual(snapshot.summary.costWeekToDate!, 0.031775, accuracy: 1e-9)
 
         XCTAssertEqual(snapshot.daily.count, 7)
         XCTAssertEqual(snapshot.daily[0].values[.claude], 30)
@@ -117,7 +121,8 @@ final class UsageStoreStatsProviderTests: XCTestCase {
         XCTAssertEqual(claudeRow.output, 300)
         XCTAssertEqual(claudeRow.cacheRead, 1_000)
         XCTAssertEqual(claudeRow.cacheWrite, 10)
-        XCTAssertNil(claudeRow.cost)
+        // (100×10 + 300×50 + 10×12.5 + 1000×1.0) / 1e6
+        XCTAssertEqual(claudeRow.cost!, 0.017125, accuracy: 1e-9)
         XCTAssertEqual(claudeRow.share, 400.0 / 500.0, accuracy: 1e-9)
         // Largest volume first
         XCTAssertEqual(snapshot.detailRows.first?.tool, .claude)
@@ -136,5 +141,56 @@ final class UsageStoreStatsProviderTests: XCTestCase {
         XCTAssertEqual(snapshot.detailRows[0].input, 15)
         XCTAssertEqual(snapshot.detailRows[0].output, 55)
         XCTAssertEqual(snapshot.detailRows[0].share, 1.0, accuracy: 1e-9)
+    }
+
+    // MARK: Pricing edge cases & rankings
+
+    func testUnpricedOnlyUsageShowsNoCostInsteadOfZero() throws {
+        let store = try makeStore()
+        try store.record([event(model: "mystery-model", input: 100, output: 100, dedupKey: "u")])
+        let snapshot = try UsageStoreStatsProvider.snapshot(
+            store: store, now: now, activeSessions: 0, calendar: calendar, timeZone: tz
+        )
+        XCTAssertNil(snapshot.summary.equivalentCostToday, "all-unpriced usage renders — not $0.00")
+        XCTAssertNil(snapshot.summary.costWeekToDate)
+        XCTAssertNil(snapshot.detailRows[0].cost)
+    }
+
+    func testEmptyStoreCostIsZeroNotNil() throws {
+        let snapshot = try UsageStoreStatsProvider.snapshot(
+            store: try makeStore(), now: now, activeSessions: 0, calendar: calendar, timeZone: tz
+        )
+        XCTAssertEqual(snapshot.summary.equivalentCostToday, 0, "no usage genuinely costs $0")
+    }
+
+    func testSettingsOverrideChangesCost() throws {
+        let store = try makeStore()
+        try store.record([event(input: 1_000_000, output: 0, dedupKey: "o")])
+        let overridden = try UsageStoreStatsProvider.snapshot(
+            store: store, now: now, activeSessions: 0, calendar: calendar, timeZone: tz,
+            priceTable: UsagePriceTable(overrides: UsagePriceTable.parseOverrides(
+                json: #"{"fable": {"input": 100, "output": 1}}"#
+            )!)
+        )
+        XCTAssertEqual(overridden.summary.equivalentCostToday!, 100, accuracy: 1e-9)
+    }
+
+    func testTopRankingsComeFromCurrentWeek() throws {
+        let store = try makeStore()
+        try store.record([
+            event(project: "/w/CodeIsland", input: 100, output: 200, dedupKey: "p1"),
+            event(project: "/w/CodeIsland_p-kstm", input: 50, output: 50, dedupKey: "p1w"),
+            event(tool: "codex", model: "gpt-5-codex", project: "", input: 10, output: 30, dedupKey: "p2"),
+            // Previous weeks stay out of the ranking window
+            event(project: "/w/old-project", daysAgo: 14, input: 9_999, output: 0, dedupKey: "p3"),
+        ])
+        let snapshot = try UsageStoreStatsProvider.snapshot(
+            store: store, now: now, activeSessions: 0, calendar: calendar, timeZone: tz
+        )
+        XCTAssertEqual(snapshot.topProjects.first?.name, "CodeIsland")
+        XCTAssertEqual(snapshot.topProjects.first?.tokens, 400, "worktree tokens fold into the main project")
+        XCTAssertFalse(snapshot.topProjects.contains { $0.name == "old-project" })
+        XCTAssertEqual(snapshot.topTools.first?.name, "Claude")
+        XCTAssertEqual(snapshot.topTools.map(\.name).count, 2)
     }
 }

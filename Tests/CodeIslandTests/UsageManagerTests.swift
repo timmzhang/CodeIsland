@@ -63,7 +63,9 @@ final class UsageManagerTests: XCTestCase {
         XCTAssertEqual(snapshot.cacheHitRate!, 100_000.0 / 101_500.0, accuracy: 1e-9)
         XCTAssertEqual(snapshot.perTool.map(\.tool), ["claude-code", "codex"])
         XCTAssertEqual(snapshot.perTool.map(\.tokens), [5_000, 2_000])
-        XCTAssertNil(snapshot.equivalentCostUSD)  // pricing lands in P2
+        // Cost needs model-level rows; pushSnapshot attaches it separately
+        // from the tool × model query (see UsageManager.pushSnapshot).
+        XCTAssertNil(snapshot.equivalentCostUSD)
         XCTAssertTrue(snapshot.hasData)
     }
 
