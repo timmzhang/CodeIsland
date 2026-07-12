@@ -22,6 +22,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.applicationIconImage = SettingsWindowController.bundleAppIcon()
         SettingsWindowController.shared.appState = appState
         StatusItemController.shared.startObserving()
+        UsageStatsWindowController.shared.startObserving()
         // Start HookServer BEFORE installing hooks into CLI configs.
         // If we write settings.json first, Claude Code picks up the new hooks
         // immediately but the socket isn't listening yet — PermissionRequest

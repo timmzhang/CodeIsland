@@ -57,14 +57,15 @@ extension Notification.Name {
 // MARK: - Formatting
 
 enum UsageFormat {
-    /// 2034000 → "2.03M", 410000 → "410K", 950 → "950"
+    /// 2034000 → "2.03M", 1900000 → "1.9M", 410000 → "410K", 950 → "950".
+    /// Trailing zeros are trimmed so table columns stay quiet.
     static func compactTokens(_ tokens: Int) -> String {
         let n = Double(tokens)
         switch tokens {
         case 1_000_000...:
             let m = n / 1_000_000
-            if m < 10 { return String(format: "%.2fM", m) }
-            if m < 100 { return String(format: "%.1fM", m) }
+            if m < 10 { return trimmed(m, decimals: 2) + "M" }
+            if m < 100 { return trimmed(m, decimals: 1) + "M" }
             return String(format: "%.0fM", m)
         case 1_000...:
             return String(format: "%.0fK", n / 1_000)
@@ -78,9 +79,22 @@ enum UsageFormat {
         String(format: "≈$%.2f", usd)
     }
 
+    /// 3.87 → "$3.87" — for cells whose column header already says "cost".
+    static func cost(_ usd: Double) -> String {
+        String(format: "$%.2f", usd)
+    }
+
     /// 0.914 → "91.4%"
     static func percent(_ ratio: Double) -> String {
         String(format: "%.1f%%", ratio * 100)
+    }
+
+    private static func trimmed(_ value: Double, decimals: Int) -> String {
+        var s = String(format: "%.\(decimals)f", value)
+        guard s.contains(".") else { return s }
+        while s.hasSuffix("0") { s.removeLast() }
+        if s.hasSuffix(".") { s.removeLast() }
+        return s
     }
 }
 
@@ -97,15 +111,10 @@ private func usageToolFamily(_ tool: String) -> String {
 }
 
 /// Chart series color per tool — validated for color-blind distinction
-/// and contrast on the dark panel background.
+/// and contrast on the dark panel background. Single source of truth is
+/// `UsageTool.color` (shared with the stats window).
 func usageToolColor(_ tool: String) -> Color {
-    switch usageToolFamily(tool) {
-    case "claude": return Color(red: 0.851, green: 0.349, blue: 0.149)  // #d95926
-    case "codex":  return Color(red: 0.098, green: 0.620, blue: 0.439)  // #199e70
-    case "gemini": return Color(red: 0.224, green: 0.529, blue: 0.898)  // #3987e5
-    case "kimi":   return Color(red: 0.788, green: 0.522, blue: 0.000)  // #c98500
-    default:       return Color(red: 0.565, green: 0.522, blue: 0.914)  // #9085e9
-    }
+    UsageTool(toolIdentifier: tool).color
 }
 
 /// Display name for a usage tool identifier in usage lists

@@ -8,13 +8,28 @@ import SwiftUI
 final class UsageStatsWindowController {
     static let shared = UsageStatsWindowController()
 
-    /// Swap in the real aggregate-store-backed provider once it lands
-    /// (p-t3qf); defaults to canned sample data so the window is usable
-    /// and reviewable before then.
+    /// Swap in a UsageStore-backed provider once end-to-end collection is
+    /// wired into the app (the store and per-tool providers already live in
+    /// CodeIslandCore); defaults to canned sample data so the window is
+    /// usable and reviewable before then.
     var provider: UsageStatsProviding = SampleUsageStatsProvider()
 
     private var window: NSWindow?
     private var closeObserver: NSObjectProtocol?
+    private var openObserver: NSObjectProtocol?
+
+    /// The notch toolbar entry (UsageToolbarEntry) posts
+    /// `.openUsageStatsWindow` instead of depending on this controller.
+    func startObserving() {
+        guard openObserver == nil else { return }
+        openObserver = NotificationCenter.default.addObserver(
+            forName: .openUsageStatsWindow, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in
+                UsageStatsWindowController.shared.show()
+            }
+        }
+    }
 
     private func clearCloseObserver() {
         if let closeObserver {

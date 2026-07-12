@@ -147,7 +147,7 @@ struct UsageStatsView: View {
     private func tiles(_ summary: UsageSummary) -> some View {
         HStack(spacing: 10) {
             tile(key: l10n["usage_tile_today"]) {
-                Text(UsageTokenFormat.abbreviated(summary.todayTokens, millionDecimals: 2))
+                Text(UsageFormat.compactTokens(summary.todayTokens))
             } detail: {
                 if let delta = summary.todayDeltaVsYesterday {
                     let up = delta >= 0
@@ -157,19 +157,19 @@ struct UsageStatsView: View {
                 }
             }
             tile(key: l10n["usage_tile_cost"]) {
-                Text(summary.equivalentCostToday.map(UsageTokenFormat.cost) ?? "—")
+                Text(summary.equivalentCostToday.map(UsageFormat.cost) ?? "—")
             } detail: {
                 if let week = summary.costWeekToDate {
-                    Text(String(format: l10n["usage_week_cumulative"], UsageTokenFormat.cost(week)))
+                    Text(String(format: l10n["usage_week_cumulative"], UsageFormat.cost(week)))
                 }
             }
             tile(key: l10n["usage_tile_cache"]) {
-                Text(summary.cacheHitRate.map(UsageTokenFormat.percent) ?? "—")
+                Text(summary.cacheHitRate.map(UsageFormat.percent) ?? "—")
             } detail: {
                 Text(String(
                     format: l10n["usage_cache_rw"],
-                    UsageTokenFormat.abbreviated(summary.cacheReadTokens),
-                    UsageTokenFormat.abbreviated(summary.cacheWriteTokens)
+                    UsageFormat.compactTokens(summary.cacheReadTokens),
+                    UsageFormat.compactTokens(summary.cacheWriteTokens)
                 ))
             }
             tile(key: l10n["usage_tile_sessions"]) {
@@ -228,11 +228,11 @@ struct UsageStatsView: View {
             ForEach(Array(snapshot.detailRows.enumerated()), id: \.element.id) { index, row in
                 GridRow {
                     toolCell(row)
-                    numberCell(UsageTokenFormat.abbreviated(row.input))
-                    numberCell(UsageTokenFormat.abbreviated(row.output))
-                    numberCell(row.cacheWrite > 0 ? UsageTokenFormat.abbreviated(row.cacheWrite) : "—")
-                    numberCell(row.cacheRead > 0 ? UsageTokenFormat.abbreviated(row.cacheRead) : "—")
-                    numberCell(row.cost.map(UsageTokenFormat.cost) ?? "—")
+                    numberCell(UsageFormat.compactTokens(row.input))
+                    numberCell(UsageFormat.compactTokens(row.output))
+                    numberCell(row.cacheWrite > 0 ? UsageFormat.compactTokens(row.cacheWrite) : "—")
+                    numberCell(row.cacheRead > 0 ? UsageFormat.compactTokens(row.cacheRead) : "—")
+                    numberCell(row.cost.map(UsageFormat.cost) ?? "—")
                     shareCell(row)
                 }
                 if index < snapshot.detailRows.count - 1 {
@@ -247,11 +247,11 @@ struct UsageStatsView: View {
                     .gridColumnAlignment(.leading)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
-                totalCell(UsageTokenFormat.abbreviated(snapshot.detailTotalInput))
-                totalCell(UsageTokenFormat.abbreviated(snapshot.detailTotalOutput))
-                totalCell(UsageTokenFormat.abbreviated(snapshot.detailTotalCacheWrite))
-                totalCell(UsageTokenFormat.abbreviated(snapshot.detailTotalCacheRead))
-                totalCell(snapshot.detailTotalCost.map(UsageTokenFormat.cost) ?? "—")
+                totalCell(UsageFormat.compactTokens(snapshot.detailTotalInput))
+                totalCell(UsageFormat.compactTokens(snapshot.detailTotalOutput))
+                totalCell(UsageFormat.compactTokens(snapshot.detailTotalCacheWrite))
+                totalCell(UsageFormat.compactTokens(snapshot.detailTotalCacheRead))
+                totalCell(snapshot.detailTotalCost.map(UsageFormat.cost) ?? "—")
                 Text("")
             }
         }
@@ -403,7 +403,7 @@ private struct UsageChartCard: View {
                 .cornerRadius(segment.isTop ? 4 : 1.5)
                 .annotation(position: .top, spacing: 5) {
                     if segment.isTop {
-                        Text(UsageTokenFormat.abbreviated(segment.bucketTotal))
+                        Text(UsageFormat.compactTokens(segment.bucketTotal))
                             .font(.system(size: 9.5, design: .monospaced))
                             .foregroundStyle(ink2)
                     }
@@ -424,7 +424,7 @@ private struct UsageChartCard: View {
                     .foregroundStyle((value.as(Double.self) ?? 1) == 0 ? baseLine : gridLine)
                 AxisValueLabel {
                     if let v = value.as(Double.self) {
-                        Text(UsageTokenFormat.abbreviated(Int(v)))
+                        Text(UsageFormat.compactTokens(Int(v)))
                             .font(.system(size: 9.5, design: .monospaced))
                             .foregroundStyle(ink3)
                     }
@@ -487,14 +487,14 @@ private struct UsageChartCard: View {
                         .foregroundStyle(ink)
                 }
                 Spacer(minLength: 14)
-                Text(UsageTokenFormat.abbreviated(segment.value))
+                Text(UsageFormat.compactTokens(segment.value))
                     .bold()
                     .foregroundStyle(ink)
             }
             HStack {
                 Text(totalLabel)
                 Spacer(minLength: 14)
-                Text(UsageTokenFormat.abbreviated(segment.bucketTotal))
+                Text(UsageFormat.compactTokens(segment.bucketTotal))
             }
             .foregroundStyle(ink3)
         }

@@ -3,30 +3,28 @@ import XCTest
 
 final class UsageStatsWindowTests: XCTestCase {
 
-    // MARK: Token formatting
+    // MARK: Formatting used by the window (shared UsageFormat)
 
-    func testAbbreviatedBelowThousand() {
-        XCTAssertEqual(UsageTokenFormat.abbreviated(0), "0")
-        XCTAssertEqual(UsageTokenFormat.abbreviated(940), "940")
+    func testCompactTokensTrimsTrailingZeros() {
+        XCTAssertEqual(UsageFormat.compactTokens(1_900_000), "1.9M")
+        XCTAssertEqual(UsageFormat.compactTokens(2_000_000), "2M")
+        XCTAssertEqual(UsageFormat.compactTokens(38_200_000), "38.2M")
     }
 
-    func testAbbreviatedThousands() {
-        XCTAssertEqual(UsageTokenFormat.abbreviated(1000), "1K")
-        XCTAssertEqual(UsageTokenFormat.abbreviated(410_000), "410K")
-        XCTAssertEqual(UsageTokenFormat.abbreviated(999_400), "999K")
+    func testPlainCost() {
+        XCTAssertEqual(UsageFormat.cost(3.87), "$3.87")
+        XCTAssertEqual(UsageFormat.cost(30.6), "$30.60")
     }
 
-    func testAbbreviatedMillions() {
-        XCTAssertEqual(UsageTokenFormat.abbreviated(2_600_000), "2.6M")
-        XCTAssertEqual(UsageTokenFormat.abbreviated(2_034_000, millionDecimals: 2), "2.03M")
-        // ≥10M drops decimals, matching the mockup formatter.
-        XCTAssertEqual(UsageTokenFormat.abbreviated(12_700_000), "13M")
-        XCTAssertEqual(UsageTokenFormat.abbreviated(38_200_000), "38M")
-    }
+    // MARK: Tool identifier folding
 
-    func testCostAndPercent() {
-        XCTAssertEqual(UsageTokenFormat.cost(3.87), "$3.87")
-        XCTAssertEqual(UsageTokenFormat.percent(0.914), "91.4%")
+    func testToolIdentifierFoldsOntoSeries() {
+        XCTAssertEqual(UsageTool(toolIdentifier: "claude-code"), .claude)
+        XCTAssertEqual(UsageTool(toolIdentifier: "Codex"), .codex)
+        XCTAssertEqual(UsageTool(toolIdentifier: "gemini-cli"), .gemini)
+        XCTAssertEqual(UsageTool(toolIdentifier: "kimi"), .kimi)
+        XCTAssertEqual(UsageTool(toolIdentifier: "trae"), .other)
+        XCTAssertEqual(UsageTool(toolIdentifier: "otherwise-unknown"), .other)
     }
 
     // MARK: Chart segment building

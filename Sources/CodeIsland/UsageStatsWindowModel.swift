@@ -15,6 +15,13 @@ enum UsageTool: String, CaseIterable, Identifiable, Codable, Sendable {
 
     var id: String { rawValue }
 
+    /// Folds provider tool identifiers ("claude-code", "codex", …) onto the
+    /// five chart series; unrecognized tools land in `.other`.
+    init(toolIdentifier: String) {
+        let lowered = toolIdentifier.lowercased()
+        self = UsageTool.allCases.first { $0 != .other && lowered.hasPrefix($0.rawValue) } ?? .other
+    }
+
     var displayName: String {
         switch self {
         case .claude: return "Claude"
@@ -123,35 +130,6 @@ protocol UsageStatsProviding: Sendable {
     /// True while the data is canned demo data — the window shows a badge.
     var isSampleData: Bool { get }
     func loadSnapshot() async throws -> UsageStatsSnapshot
-}
-
-// MARK: - Token formatting
-
-enum UsageTokenFormat {
-    /// Abbreviated token count: 940 → "940", 410_000 → "410K",
-    /// 2_034_567 → "2.0M" (decimals configurable), 12_700_000 → "13M".
-    /// Mirrors the mockup's formatter so the window matches the design.
-    static func abbreviated(_ tokens: Int, millionDecimals: Int = 1) -> String {
-        let sign = tokens < 0 ? "-" : ""
-        let value = abs(tokens)
-        if value >= 1_000_000 {
-            let m = Double(value) / 1_000_000
-            let decimals = value >= 10_000_000 ? 0 : millionDecimals
-            return sign + String(format: "%.\(decimals)fM", m)
-        }
-        if value >= 1000 {
-            return sign + String(format: "%.0fK", Double(value) / 1000)
-        }
-        return sign + String(value)
-    }
-
-    static func cost(_ usd: Double) -> String {
-        String(format: "$%.2f", usd)
-    }
-
-    static func percent(_ fraction: Double) -> String {
-        String(format: "%.1f%%", fraction * 100)
-    }
 }
 
 // MARK: - Stacked chart segments
