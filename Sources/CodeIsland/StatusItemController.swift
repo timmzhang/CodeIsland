@@ -63,6 +63,14 @@ final class StatusItemController: NSObject {
         settingsItem.target = self
         menu.addItem(settingsItem)
 
+        let usageItem = NSMenuItem(
+            title: L10n.shared["usage_stats_ellipsis"],
+            action: #selector(openUsageStats),
+            keyEquivalent: ""
+        )
+        usageItem.target = self
+        menu.addItem(usageItem)
+
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(
@@ -79,6 +87,12 @@ final class StatusItemController: NSObject {
     @objc private func openSettings() {
         Task { @MainActor in
             SettingsWindowController.shared.show()
+        }
+    }
+
+    @objc private func openUsageStats() {
+        Task { @MainActor in
+            UsageStatsWindowController.shared.show()
         }
     }
 
