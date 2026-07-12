@@ -188,7 +188,7 @@ extension AppState {
             } else if flagStrings.contains("waitingOnUserInput") {
                 snapshot.status = .waitingQuestion
             } else {
-                snapshot.status = .running
+                snapshot.status = .processing
                 snapshot.currentTool = nil
                 snapshot.toolDescription = nil
             }

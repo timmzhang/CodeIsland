@@ -80,6 +80,9 @@ enum SettingsKey {
     // Tool status display
     static let showToolStatus = "showToolStatus"              // true = detailed, false = simple
 
+    // Today-usage badge in the compact bar (L1, docs/design/token-usage.md)
+    static let showUsageBadge = "showUsageBadge"
+
     // Island collapsed width scale (percentage: 50–150, default 100)
     static let collapsedWidthScale = "collapsedWidthScale"
 
@@ -148,6 +151,8 @@ struct SettingsDefaults {
 
     static let showToolStatus = true
 
+    static let showUsageBadge = true
+
     static let collapsedWidthScale = 100  // percentage
 
     static let defaultSource = "claude"
@@ -213,6 +218,7 @@ class SettingsManager {
             SettingsKey.mascotSpeed: SettingsDefaults.mascotSpeed,
             SettingsKey.sessionGroupingMode: SettingsDefaults.sessionGroupingMode,
             SettingsKey.showToolStatus: SettingsDefaults.showToolStatus,
+            SettingsKey.showUsageBadge: SettingsDefaults.showUsageBadge,
             SettingsKey.collapsedWidthScale: SettingsDefaults.collapsedWidthScale,
             SettingsKey.esp32BridgeEnabled: SettingsDefaults.esp32BridgeEnabled,
             SettingsKey.esp32HeartbeatSeconds: SettingsDefaults.esp32HeartbeatSeconds,
