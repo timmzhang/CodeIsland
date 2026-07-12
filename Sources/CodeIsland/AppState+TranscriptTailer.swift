@@ -34,6 +34,12 @@ extension AppState {
 
     /// Apply an incremental update produced by the tailer. Runs on the main actor.
     func applyTranscriptDelta(_ delta: ConversationTailDelta) {
+        // Usage rows count even for sessions we no longer track — forward
+        // before the session-existence guard below.
+        if !delta.usageEvents.isEmpty {
+            UsageManager.shared.ingestClaude(delta.usageEvents)
+        }
+
         for permissionDecision in delta.permissionDecisions {
             _ = resolvePermissionFromTranscript(
                 sessionId: delta.sessionId,
