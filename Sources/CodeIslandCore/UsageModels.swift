@@ -15,6 +15,11 @@ public struct UsageEvent: Equatable, Sendable {
     public let sessionId: String
     /// Model identifier as reported by the tool, e.g. "claude-opus-4-8".
     public let model: String
+    /// Project the turn ran in — the working directory's absolute path as
+    /// reported by the tool (Claude Code transcripts carry it as `cwd`).
+    /// Empty when unknown. Kept as a raw path; display folding (basename,
+    /// worktree suffixes) is a UI concern.
+    public let project: String
     /// Wall-clock time of the assistant turn. Bucketed to the local hour
     /// when aggregated.
     public let timestamp: Date
@@ -35,6 +40,7 @@ public struct UsageEvent: Equatable, Sendable {
         tool: String,
         sessionId: String,
         model: String,
+        project: String = "",
         timestamp: Date,
         inputTokens: Int64,
         outputTokens: Int64,
@@ -46,6 +52,7 @@ public struct UsageEvent: Equatable, Sendable {
         self.tool = tool
         self.sessionId = sessionId
         self.model = model
+        self.project = project
         self.timestamp = timestamp
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
@@ -114,6 +121,18 @@ public struct ToolModelUsage: Equatable, Sendable {
     public init(tool: String, model: String, totals: UsageTotals) {
         self.tool = tool
         self.model = model
+        self.totals = totals
+    }
+}
+
+/// One project row of the Top-projects ranking. `project` is the raw working
+/// directory path recorded on the events ("" when the tool reported none).
+public struct ProjectUsage: Equatable, Sendable {
+    public let project: String
+    public let totals: UsageTotals
+
+    public init(project: String, totals: UsageTotals) {
+        self.project = project
         self.totals = totals
     }
 }

@@ -4,9 +4,9 @@ import SQLite3
 /// SQLite-backed store for token-usage statistics.
 ///
 /// Events are aggregated into hourly rows keyed by
-/// `(date_hour, tool, model, subagent)` — a few hundred rows per day at most —
-/// so the store stays cheap to query forever and survives transcript cleanup
-/// or compaction on the tool side (the local DB is the source of truth).
+/// `(date_hour, tool, model, project, subagent)` — a few hundred rows per day
+/// at most — so the store stays cheap to query forever and survives transcript
+/// cleanup or compaction on the tool side (the local DB is the source of truth).
 ///
 /// Idempotency: events carrying a `dedupKey` are counted at most once, ever.
 /// Keys are remembered in a `usage_seen` table, so re-running a full backfill
@@ -61,14 +61,16 @@ public final class UsageStore: @unchecked Sendable {
                 date_hour   TEXT    NOT NULL,
                 tool        TEXT    NOT NULL,
                 model       TEXT    NOT NULL,
+                project     TEXT    NOT NULL DEFAULT '',
                 subagent    INTEGER NOT NULL DEFAULT 0,
                 input       INTEGER NOT NULL DEFAULT 0,
                 output      INTEGER NOT NULL DEFAULT 0,
                 cache_write INTEGER NOT NULL DEFAULT 0,
                 cache_read  INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (date_hour, tool, model, subagent)
+                PRIMARY KEY (date_hour, tool, model, project, subagent)
             )
             """)
+        try migrateHourlyTableAddingProjectIfNeeded()
         try exec("""
             CREATE TABLE IF NOT EXISTS usage_seen (
                 key TEXT PRIMARY KEY
