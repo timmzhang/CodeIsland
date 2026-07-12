@@ -88,6 +88,50 @@ public final class UsageStore: @unchecked Sendable {
         if let db { sqlite3_close(db) }
     }
 
+    // MARK: - Migration
+
+    /// Pre-project databases keyed rows on `(date_hour, tool, model, subagent)`.
+    /// SQLite can't extend a primary key in place, so rebuild the table once,
+    /// carrying old rows over with an empty project (they predate attribution).
+    private func migrateHourlyTableAddingProjectIfNeeded() throws {
+        let stmt = try prepare("PRAGMA table_info(usage_hourly)")
+        defer { sqlite3_finalize(stmt) }
+        var hasProject = false
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if columnText(stmt, 1) == "project" { hasProject = true }
+        }
+        guard !hasProject else { return }
+
+        try exec("BEGIN IMMEDIATE")
+        do {
+            try exec("ALTER TABLE usage_hourly RENAME TO usage_hourly_v1")
+            try exec("""
+                CREATE TABLE usage_hourly (
+                    date_hour   TEXT    NOT NULL,
+                    tool        TEXT    NOT NULL,
+                    model       TEXT    NOT NULL,
+                    project     TEXT    NOT NULL DEFAULT '',
+                    subagent    INTEGER NOT NULL DEFAULT 0,
+                    input       INTEGER NOT NULL DEFAULT 0,
+                    output      INTEGER NOT NULL DEFAULT 0,
+                    cache_write INTEGER NOT NULL DEFAULT 0,
+                    cache_read  INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (date_hour, tool, model, project, subagent)
+                )
+                """)
+            try exec("""
+                INSERT INTO usage_hourly (date_hour, tool, model, project, subagent, input, output, cache_write, cache_read)
+                SELECT date_hour, tool, model, '', subagent, input, output, cache_write, cache_read
+                FROM usage_hourly_v1
+                """)
+            try exec("DROP TABLE usage_hourly_v1")
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
     // MARK: - Writing
 
     /// Accumulates a batch of events into the hourly aggregate rows inside a
@@ -128,9 +172,9 @@ public final class UsageStore: @unchecked Sendable {
 
     private func upsert(_ event: UsageEvent) throws {
         let stmt = try prepare("""
-            INSERT INTO usage_hourly (date_hour, tool, model, subagent, input, output, cache_write, cache_read)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(date_hour, tool, model, subagent) DO UPDATE SET
+            INSERT INTO usage_hourly (date_hour, tool, model, project, subagent, input, output, cache_write, cache_read)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date_hour, tool, model, project, subagent) DO UPDATE SET
                 input       = input       + excluded.input,
                 output      = output      + excluded.output,
                 cache_write = cache_write + excluded.cache_write,
@@ -140,11 +184,12 @@ public final class UsageStore: @unchecked Sendable {
         bindText(stmt, 1, hourKey(for: event.timestamp))
         bindText(stmt, 2, event.tool)
         bindText(stmt, 3, event.model)
-        sqlite3_bind_int(stmt, 4, event.isSubagent ? 1 : 0)
-        sqlite3_bind_int64(stmt, 5, event.inputTokens)
-        sqlite3_bind_int64(stmt, 6, event.outputTokens)
-        sqlite3_bind_int64(stmt, 7, event.cacheWriteTokens)
-        sqlite3_bind_int64(stmt, 8, event.cacheReadTokens)
+        bindText(stmt, 4, event.project)
+        sqlite3_bind_int(stmt, 5, event.isSubagent ? 1 : 0)
+        sqlite3_bind_int64(stmt, 6, event.inputTokens)
+        sqlite3_bind_int64(stmt, 7, event.outputTokens)
+        sqlite3_bind_int64(stmt, 8, event.cacheWriteTokens)
+        sqlite3_bind_int64(stmt, 9, event.cacheReadTokens)
         try stepDone(stmt)
     }
 
@@ -208,6 +253,29 @@ public final class UsageStore: @unchecked Sendable {
                     tool: columnText(stmt, 0),
                     model: columnText(stmt, 1),
                     totals: totalsColumns(stmt, startingAt: 2)
+                ))
+            }
+            return rows
+        }
+    }
+
+    /// Project rows for the Top-projects ranking, largest chart volume first.
+    /// Rows recorded without project attribution land in the "" bucket.
+    public func totalsByProject(in range: DateInterval) throws -> [ProjectUsage] {
+        try queue.sync {
+            let stmt = try prepare("""
+                SELECT project,
+                       SUM(input), SUM(output), SUM(cache_read), SUM(cache_write)
+                FROM usage_hourly WHERE date_hour >= ? AND date_hour <= ?
+                GROUP BY project ORDER BY SUM(input) + SUM(output) DESC
+                """)
+            defer { sqlite3_finalize(stmt) }
+            bindHourRange(stmt, range)
+            var rows: [ProjectUsage] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                rows.append(ProjectUsage(
+                    project: columnText(stmt, 0),
+                    totals: totalsColumns(stmt, startingAt: 1)
                 ))
             }
             return rows

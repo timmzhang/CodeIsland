@@ -1,4 +1,17 @@
 import SwiftUI
+import CodeIslandCore
+
+// MARK: - Pricing (Settings-layered price table)
+
+extension UsagePriceTable {
+    /// The effective price table: built-in rules with the user's Settings
+    /// overrides (`SettingsKey.usagePricingOverrides`, JSON) layered on top.
+    /// Invalid override JSON is ignored — built-in prices still apply.
+    static func fromSettings(_ defaults: UserDefaults = .standard) -> UsagePriceTable {
+        let json = defaults.string(forKey: SettingsKey.usagePricingOverrides) ?? ""
+        return UsagePriceTable(overrides: UsagePriceTable.parseOverrides(json: json) ?? [])
+    }
+}
 
 // MARK: - L1 Usage Snapshot (contract with the usage data layer)
 //
@@ -87,6 +100,11 @@ enum UsageFormat {
     /// 0.914 → "91.4%"
     static func percent(_ ratio: Double) -> String {
         String(format: "%.1f%%", ratio * 100)
+    }
+
+    /// 0.71 → "71%" — for ranking value columns where a decimal is noise.
+    static func percentWhole(_ ratio: Double) -> String {
+        String(format: "%.0f%%", ratio * 100)
     }
 
     private static func trimmed(_ value: Double, decimals: Int) -> String {

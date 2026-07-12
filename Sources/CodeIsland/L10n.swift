@@ -383,6 +383,13 @@ final class L10n: ObservableObject {
         "usage_tool_other": "Other",
         "usage_sample_badge": "SAMPLE DATA",
         "usage_footnote": "* Equivalent cost is computed at each model's API list price. Subscription (Pro / Max) users are not billed this way — it shows what the same usage would cost via the API. Prices can be updated in Settings. IDE tools such as Cursor / Copilot cannot be measured and are not listed.",
+        "usage_top_projects": "Top Projects",
+        "usage_top_tools": "Top Tools",
+        "usage_rank_others": "Others (%d)",
+        "usage_project_unknown": "Unattributed",
+        "usage_pricing_override": "Equivalent-Cost Price Overrides",
+        "usage_pricing_override_desc": "JSON, $/MTok — e.g. {\"opus-4-8\": {\"input\": 5, \"output\": 25}}. Takes precedence over the built-in price table; leave empty to use built-in prices.",
+        "usage_pricing_invalid": "Invalid JSON — overrides are ignored",
     ]
 
     private static let zh: [String: String] = [
@@ -730,6 +737,13 @@ final class L10n: ObservableObject {
         "usage_tool_other": "其他",
         "usage_sample_badge": "样例数据",
         "usage_footnote": "＊ 等效成本按各模型 API 牌价折算，订阅（Pro / Max）用户实际不按此付费——它表示「同样的用量走 API 要花多少」。价格表可在设置中更新。Cursor / Copilot 等 IDE 内工具暂无法统计，未列入。",
+        "usage_top_projects": "Top 项目",
+        "usage_top_tools": "Top 工具",
+        "usage_rank_others": "其他 %d 个",
+        "usage_project_unknown": "未归属",
+        "usage_pricing_override": "等效成本单价覆盖",
+        "usage_pricing_override_desc": "JSON，单位 $/百万 token——如 {\"opus-4-8\": {\"input\": 5, \"output\": 25}}。优先于内置价格表；留空使用内置单价。",
+        "usage_pricing_invalid": "JSON 无效——覆盖未生效",
     ]
 
     private static let ja: [String: String] = [
@@ -1077,6 +1091,13 @@ final class L10n: ObservableObject {
         "usage_tool_other": "その他",
         "usage_sample_badge": "サンプルデータ",
         "usage_footnote": "＊ 換算コストは各モデルの API 定価で計算。サブスクリプション（Pro / Max）ユーザーの実際の請求とは異なり、「同じ使用量を API で行った場合の金額」を示します。価格表は設定で更新できます。Cursor / Copilot などの IDE 内ツールは計測できないため掲載していません。",
+        "usage_top_projects": "上位プロジェクト",
+        "usage_top_tools": "上位ツール",
+        "usage_rank_others": "その他 %d 件",
+        "usage_project_unknown": "未分類",
+        "usage_pricing_override": "換算コスト単価の上書き",
+        "usage_pricing_override_desc": "JSON（$/100万トークン）— 例 {\"opus-4-8\": {\"input\": 5, \"output\": 25}}。内蔵価格表より優先。空欄で内蔵単価を使用。",
+        "usage_pricing_invalid": "JSON が不正なため上書きは無効です",
     ]
 
     private static let ko: [String: String] = [
@@ -1424,6 +1445,13 @@ final class L10n: ObservableObject {
         "usage_tool_other": "기타",
         "usage_sample_badge": "샘플 데이터",
         "usage_footnote": "＊ 환산 비용은 각 모델의 API 정가 기준입니다. 구독(Pro / Max) 사용자는 실제로 이 금액을 지불하지 않으며, 「같은 사용량을 API로 쓰면 얼마인지」를 나타냅니다. 가격표는 설정에서 업데이트할 수 있습니다. Cursor / Copilot 등 IDE 내 도구는 측정할 수 없어 표시되지 않습니다.",
+        "usage_top_projects": "상위 프로젝트",
+        "usage_top_tools": "상위 도구",
+        "usage_rank_others": "기타 %d개",
+        "usage_project_unknown": "미분류",
+        "usage_pricing_override": "환산 비용 단가 재정의",
+        "usage_pricing_override_desc": "JSON, $/백만 토큰 — 예: {\"opus-4-8\": {\"input\": 5, \"output\": 25}}. 내장 가격표보다 우선하며, 비워 두면 내장 단가를 사용합니다.",
+        "usage_pricing_invalid": "JSON이 잘못되어 재정의가 적용되지 않습니다",
     ]
 
     private static let tr: [String: String] = [
@@ -1771,5 +1799,12 @@ final class L10n: ObservableObject {
         "usage_tool_other": "Diğer",
         "usage_sample_badge": "ÖRNEK VERİ",
         "usage_footnote": "* Eşdeğer maliyet her modelin API liste fiyatıyla hesaplanır. Abonelik (Pro / Max) kullanıcıları bu şekilde faturalandırılmaz — aynı kullanımın API üzerinden maliyetini gösterir. Fiyatlar Ayarlar'dan güncellenebilir. Cursor / Copilot gibi IDE içi araçlar ölçülemez ve listelenmez.",
+        "usage_top_projects": "En Çok Kullanılan Projeler",
+        "usage_top_tools": "En Çok Kullanılan Araçlar",
+        "usage_rank_others": "Diğer (%d)",
+        "usage_project_unknown": "Atanmamış",
+        "usage_pricing_override": "Eşdeğer Maliyet Fiyat Geçersiz Kılmaları",
+        "usage_pricing_override_desc": "JSON, $/MTok — örn. {\"opus-4-8\": {\"input\": 5, \"output\": 25}}. Yerleşik fiyat tablosundan önceliklidir; boş bırakılırsa yerleşik fiyatlar kullanılır.",
+        "usage_pricing_invalid": "Geçersiz JSON — geçersiz kılmalar yok sayılır",
     ]
 }

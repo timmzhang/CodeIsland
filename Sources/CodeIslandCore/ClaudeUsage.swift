@@ -15,6 +15,9 @@ public struct ClaudeUsageEvent: Equatable, Sendable {
     /// True when the row belongs to a subagent turn (`isSidechain` in the transcript),
     /// so aggregation can keep the top-level vs. subagent dimension separable.
     public let isSidechain: Bool
+    /// Working directory of the session (`cwd` on transcript rows) — the
+    /// project dimension for Top-projects rankings. Nil when the row lacks it.
+    public let cwd: String?
 
     public init(
         sessionId: String?,
@@ -26,7 +29,8 @@ public struct ClaudeUsageEvent: Equatable, Sendable {
         outputTokens: Int,
         cacheCreationTokens: Int,
         cacheReadTokens: Int,
-        isSidechain: Bool
+        isSidechain: Bool,
+        cwd: String? = nil
     ) {
         self.sessionId = sessionId
         self.messageId = messageId
@@ -38,6 +42,7 @@ public struct ClaudeUsageEvent: Equatable, Sendable {
         self.cacheCreationTokens = cacheCreationTokens
         self.cacheReadTokens = cacheReadTokens
         self.isSidechain = isSidechain
+        self.cwd = cwd
     }
 
     /// Streaming and retries duplicate the same assistant message across jsonl rows —
@@ -80,7 +85,8 @@ public struct ClaudeUsageEvent: Equatable, Sendable {
             outputTokens: output,
             cacheCreationTokens: cacheWrite,
             cacheReadTokens: cacheRead,
-            isSidechain: json["isSidechain"] as? Bool ?? false
+            isSidechain: json["isSidechain"] as? Bool ?? false,
+            cwd: json["cwd"] as? String
         )
     }
 

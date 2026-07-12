@@ -1,4 +1,5 @@
 import XCTest
+import SQLite3
 @testable import CodeIslandCore
 
 final class UsageStoreTests: XCTestCase {
@@ -33,6 +34,7 @@ final class UsageStoreTests: XCTestCase {
     private func event(
         tool: String = "claude-code",
         model: String = "claude-opus-4-8",
+        project: String = "",
         ts: Date,
         input: Int64 = 100,
         output: Int64 = 50,
@@ -42,7 +44,7 @@ final class UsageStoreTests: XCTestCase {
         subagent: Bool = false
     ) -> UsageEvent {
         UsageEvent(
-            tool: tool, sessionId: "s1", model: model, timestamp: ts,
+            tool: tool, sessionId: "s1", model: model, project: project, timestamp: ts,
             inputTokens: input, outputTokens: output,
             cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite,
             dedupKey: dedupKey, isSubagent: subagent
@@ -174,6 +176,72 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertEqual(totals.inputTokens, 15, "subagent usage counts toward the reported totals")
         let hourly = try store.totalsByHourAndTool(in: calendar.dateInterval(of: .day, for: ts)!)
         XCTAssertEqual(hourly.count, 1, "grouped queries merge the subagent dimension")
+    }
+
+    // MARK: - Project dimension
+
+    func testTotalsByProjectOrderedByChartVolumeWithEmptyBucket() throws {
+        let store = try makeStore()
+        let ts = date(2026, 7, 11, 9)
+        try store.record([
+            event(project: "/w/CodeIsland", ts: ts, input: 10, output: 5),
+            event(project: "/w/pins", ts: ts, input: 500, output: 100),
+            event(project: "", ts: ts, input: 1, output: 1),
+            event(project: "/w/CodeIsland", ts: ts, input: 30, output: 3),
+        ])
+        let rows = try store.totalsByProject(in: calendar.dateInterval(of: .day, for: ts)!)
+        XCTAssertEqual(rows.map(\.project), ["/w/pins", "/w/CodeIsland", ""])
+        XCTAssertEqual(rows[1].totals.inputTokens, 40)
+    }
+
+    func testProjectDimensionMergedInOtherQueries() throws {
+        let store = try makeStore()
+        let ts = date(2026, 7, 11, 9)
+        try store.record([
+            event(project: "/w/a", ts: ts, input: 10, output: 0),
+            event(project: "/w/b", ts: ts, input: 5, output: 0),
+        ])
+        let hourly = try store.totalsByHourAndTool(in: calendar.dateInterval(of: .day, for: ts)!)
+        XCTAssertEqual(hourly.count, 1, "hour × tool query merges the project dimension")
+        XCTAssertEqual(hourly[0].totals.inputTokens, 15)
+    }
+
+    func testMigrationFromPreProjectSchemaKeepsRows() throws {
+        // Build a v1 database (no project column) by hand, as shipped before p-kstm.
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(dbPath, &db), SQLITE_OK)
+        for sql in [
+            """
+            CREATE TABLE usage_hourly (
+                date_hour   TEXT    NOT NULL,
+                tool        TEXT    NOT NULL,
+                model       TEXT    NOT NULL,
+                subagent    INTEGER NOT NULL DEFAULT 0,
+                input       INTEGER NOT NULL DEFAULT 0,
+                output      INTEGER NOT NULL DEFAULT 0,
+                cache_write INTEGER NOT NULL DEFAULT 0,
+                cache_read  INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (date_hour, tool, model, subagent)
+            )
+            """,
+            "INSERT INTO usage_hourly VALUES ('2026-07-11 09', 'claude-code', 'claude-opus-4-8', 0, 10, 5, 2, 100)",
+            "INSERT INTO usage_hourly VALUES ('2026-07-11 10', 'codex', 'gpt-5', 0, 20, 8, 0, 0)",
+        ] {
+            XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK, String(cString: sqlite3_errmsg(db)))
+        }
+        sqlite3_close(db)
+
+        let store = try makeStore()
+        let day = calendar.dateInterval(of: .day, for: date(2026, 7, 11, 12))!
+        let totals = try store.totals(in: day)
+        XCTAssertEqual(totals.inputTokens, 30, "v1 rows survive the project migration")
+
+        let projects = try store.totalsByProject(in: day)
+        XCTAssertEqual(projects.map(\.project), [""], "migrated rows land in the unattributed bucket")
+
+        // New writes with attribution coexist with migrated rows.
+        try store.record([event(project: "/w/CodeIsland", ts: date(2026, 7, 11, 11), input: 7, output: 0)])
+        XCTAssertEqual(try store.totalsByProject(in: day).count, 2)
     }
 
     // MARK: - Persistence & meta

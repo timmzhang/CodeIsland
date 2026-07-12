@@ -103,6 +103,22 @@ struct UsageSummary: Sendable {
     var activeToolCount: Int = 0
 }
 
+/// One row of a Top ranking card (Top projects / Top tools): name, horizontal
+/// bar, and a value column. Rows are pre-ranked; the last row may be an
+/// aggregate ("others").
+struct UsageRankRow: Identifiable, Sendable {
+    let name: String
+    /// input + output tokens behind this row.
+    let tokens: Int
+    /// Bar width relative to the largest row, 0...1.
+    let fraction: Double
+    /// This row's share of the whole ranking, 0...1.
+    let share: Double
+    let color: Color
+
+    var id: String { name }
+}
+
 struct UsageStatsSnapshot: Sendable {
     var summary = UsageSummary()
     /// Last 7 days, oldest first.
@@ -111,6 +127,10 @@ struct UsageStatsSnapshot: Sendable {
     var weekly: [UsageBucket] = []
     /// Detail table rows for the current week, largest share first.
     var detailRows: [UsageDetailRow] = []
+    /// Top-projects ranking for the current week; empty hides the card.
+    var topProjects: [UsageRankRow] = []
+    /// Top-tools ranking for the current week; empty hides the card.
+    var topTools: [UsageRankRow] = []
 
     var detailTotalInput: Int { detailRows.reduce(0) { $0 + $1.input } }
     var detailTotalOutput: Int { detailRows.reduce(0) { $0 + $1.output } }
@@ -185,6 +205,89 @@ enum UsageChartBuilder {
             }
         }
         return result
+    }
+}
+
+// MARK: - Top rankings
+
+enum UsageRankingBuilder {
+    /// Rows shown individually before everything else folds into "others".
+    static let topCount = 3
+    /// Neutral bar color for the aggregate row (mockup's #3F4756).
+    static let othersColor = Color(usageHex: 0x3F4756)
+
+    /// Display name for a raw project path: last path component, with the
+    /// auto-worktree suffix ("CodeIsland_p-kstm" → "CodeIsland") folded away
+    /// so a task worktree ranks together with its main checkout.
+    static func projectDisplayName(_ rawPath: String) -> String {
+        let base = (rawPath as NSString).lastPathComponent
+        guard !base.isEmpty else { return rawPath }
+        if let range = base.range(of: #"_p-[a-z0-9]{4,}$"#, options: .regularExpression) {
+            let folded = String(base[..<range.lowerBound])
+            if !folded.isEmpty { return folded }
+        }
+        return base
+    }
+
+    /// Fold raw `(project path, tokens)` pairs onto display names and rank
+    /// them. Empty paths (rows that predate attribution, or tools that don't
+    /// report one) surface as the localized "unattributed" bucket.
+    static func projectRows(_ projects: [(project: String, tokens: Int)]) -> [UsageRankRow] {
+        var byName: [String: Int] = [:]
+        for (project, tokens) in projects where tokens > 0 {
+            let name = project.isEmpty ? L10n.shared["usage_project_unknown"] : projectDisplayName(project)
+            byName[name, default: 0] += tokens
+        }
+        let entries = byName.map { (name: $0.key, tokens: $0.value, color: UsageTool.claude.color) }
+        return rank(entries)
+    }
+
+    /// Tool ranking derived from the detail table rows (tokens = input+output
+    /// per tool), so providers don't need a separate query.
+    static func toolRows(fromDetail rows: [UsageDetailRow]) -> [UsageRankRow] {
+        var byTool: [UsageTool: (name: String, tokens: Int)] = [:]
+        for row in rows {
+            let tokens = row.input + row.output
+            guard tokens > 0 else { continue }
+            var entry = byTool[row.tool] ?? (row.toolName, 0)
+            entry.tokens += tokens
+            byTool[row.tool] = entry
+        }
+        let entries = byTool.map { (name: $0.value.name, tokens: $0.value.tokens, color: $0.key.color) }
+        return rank(entries)
+    }
+
+    /// Sort descending, keep the top rows, fold the tail into one aggregate
+    /// row. Bar widths are relative to the largest row.
+    static func rank(_ entries: [(name: String, tokens: Int, color: Color)]) -> [UsageRankRow] {
+        let sorted = entries.filter { $0.tokens > 0 }.sorted { $0.tokens > $1.tokens }
+        guard !sorted.isEmpty else { return [] }
+        let grandTotal = sorted.reduce(0) { $0 + $1.tokens }
+
+        var rows = sorted
+        var aggregate: (name: String, tokens: Int, color: Color)?
+        // Folding a single row into "others" would just rename it — only fold 2+.
+        if sorted.count > topCount + 1 {
+            let tail = sorted[topCount...]
+            aggregate = (
+                String(format: L10n.shared["usage_rank_others"], tail.count),
+                tail.reduce(0) { $0 + $1.tokens },
+                othersColor
+            )
+            rows = Array(sorted[..<topCount])
+        }
+        if let aggregate { rows.append(aggregate) }
+
+        let maxTokens = rows.map(\.tokens).max() ?? 1
+        return rows.map { entry in
+            UsageRankRow(
+                name: entry.name,
+                tokens: entry.tokens,
+                fraction: Double(entry.tokens) / Double(maxTokens),
+                share: grandTotal > 0 ? Double(entry.tokens) / Double(grandTotal) : 0,
+                color: entry.color
+            )
+        }
     }
 }
 
@@ -285,6 +388,17 @@ struct SampleUsageStatsProvider: UsageStatsProviding {
                 cost: 0.60, share: 0.01
             ),
         ]
+
+        snapshot.topProjects = UsageRankingBuilder.projectRows([
+            ("/Users/me/Workspace/CodeIsland", 6_200_000),
+            ("/Users/me/Workspace/CodeIsland_p-kstm", 1_100_000),
+            ("/Users/me/.agents/skills/pins", 3_800_000),
+            ("/Users/me/Workspace/LarkMail", 2_400_000),
+            ("/Users/me/Workspace/blog", 900_000),
+            ("/Users/me/Workspace/dotfiles", 500_000),
+            ("", 300_000),
+        ])
+        snapshot.topTools = UsageRankingBuilder.toolRows(fromDetail: snapshot.detailRows)
         return snapshot
     }
 }

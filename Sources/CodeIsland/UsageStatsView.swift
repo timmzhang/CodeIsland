@@ -76,6 +76,9 @@ struct UsageStatsView: View {
                 totalLabel: l10n[granularity == .day ? "usage_total_day" : "usage_total_week"]
             )
             detailTable(snapshot)
+            if !snapshot.topProjects.isEmpty || !snapshot.topTools.isEmpty {
+                rankingCards(snapshot)
+            }
             Text(l10n["usage_footnote"])
                 .font(.system(size: 10))
                 .foregroundStyle(ink3)
@@ -326,6 +329,59 @@ struct UsageStatsView: View {
         .gridColumnAlignment(.trailing)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    // MARK: Top rankings
+
+    /// Top-projects / Top-tools cards. Projects show token volume; tools
+    /// show their share of the main metric (mockup's 周报 cards).
+    private func rankingCards(_ snapshot: UsageStatsSnapshot) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            if !snapshot.topProjects.isEmpty {
+                rankingCard(title: l10n["usage_top_projects"], rows: snapshot.topProjects, showsShare: false)
+            }
+            if !snapshot.topTools.isEmpty {
+                rankingCard(title: l10n["usage_top_tools"], rows: snapshot.topTools, showsShare: true)
+            }
+        }
+    }
+
+    private func rankingCard(title: String, rows: [UsageRankRow], showsShare: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(title)
+                .font(.system(size: 10, design: .monospaced))
+                .tracking(0.8)
+                .foregroundStyle(ink3)
+            ForEach(rows) { row in
+                HStack(spacing: 8) {
+                    Text(row.name)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(ink)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(width: 96, alignment: .leading)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(shareTrack)
+                            Capsule()
+                                .fill(row.color)
+                                .frame(width: max(2, geo.size.width * row.fraction))
+                        }
+                    }
+                    .frame(height: 5)
+                    Text(showsShare ? UsageFormat.percentWhole(row.share) : UsageFormat.compactTokens(row.tokens))
+                        .font(.system(size: 11, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(ink2)
+                        .frame(width: 44, alignment: .trailing)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(cardBG, in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(cardBorder, lineWidth: 1))
     }
 }
 

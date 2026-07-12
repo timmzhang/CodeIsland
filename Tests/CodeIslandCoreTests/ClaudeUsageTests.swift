@@ -36,6 +36,18 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertNotNil(event.timestamp)
     }
 
+    func testParsesCwdForProjectAttribution() throws {
+        var json = try line(usageLine(messageId: "m", requestId: "r"))
+        json["cwd"] = "/Users/me/Workspace/CodeIsland"
+        let event = try XCTUnwrap(ClaudeUsageEvent.from(line: json))
+        XCTAssertEqual(event.cwd, "/Users/me/Workspace/CodeIsland")
+        XCTAssertEqual(event.normalized().project, "/Users/me/Workspace/CodeIsland")
+
+        let withoutCwd = try XCTUnwrap(ClaudeUsageEvent.from(line: line(usageLine(messageId: "m", requestId: "r"))))
+        XCTAssertNil(withoutCwd.cwd)
+        XCTAssertEqual(withoutCwd.normalized().project, "", "missing cwd lands in the unattributed bucket")
+    }
+
     func testFallbackSessionIdUsedWhenLineOmitsIt() throws {
         let json = try line(usageLine(messageId: "m", requestId: "r", sessionId: nil))
         let event = try XCTUnwrap(ClaudeUsageEvent.from(line: json, fallbackSessionId: "from-filename"))

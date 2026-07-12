@@ -10,6 +10,7 @@ extension ClaudeUsageEvent {
             tool: tool,
             sessionId: sessionId ?? "unknown",
             model: model ?? "unknown",
+            project: cwd ?? "",
             timestamp: timestamp ?? now,
             inputTokens: Int64(inputTokens),
             outputTokens: Int64(outputTokens),

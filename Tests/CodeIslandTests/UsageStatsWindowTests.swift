@@ -123,4 +123,55 @@ final class UsageStatsWindowTests: XCTestCase {
         XCTAssertEqual(Set(snapshot.daily.map(\.label)).count, 7)
         XCTAssertEqual(Set(snapshot.weekly.map(\.label)).count, 8)
     }
+
+    // MARK: Top rankings
+
+    func testProjectDisplayNameFoldsWorktreeSuffix() {
+        XCTAssertEqual(UsageRankingBuilder.projectDisplayName("/Users/me/Workspace/CodeIsland"), "CodeIsland")
+        XCTAssertEqual(UsageRankingBuilder.projectDisplayName("/Users/me/Workspace/CodeIsland_p-kstm"), "CodeIsland")
+        XCTAssertEqual(UsageRankingBuilder.projectDisplayName("/Users/me/pins_p-26sp"), "pins")
+        XCTAssertEqual(UsageRankingBuilder.projectDisplayName("/w/snake_project"), "snake_project", "only pins-style suffixes fold")
+    }
+
+    func testProjectRowsFoldWorktreesAndRankDescending() {
+        let rows = UsageRankingBuilder.projectRows([
+            ("/w/CodeIsland", 500),
+            ("/w/CodeIsland_p-kstm", 700),
+            ("/w/pins", 900),
+            ("", 100),
+        ])
+        XCTAssertEqual(Array(rows.map(\.name).prefix(2)), ["CodeIsland", "pins"], "worktree usage merges into the main project")
+        XCTAssertEqual(rows[0].tokens, 1200)
+        XCTAssertEqual(rows[0].fraction, 1, "bar widths are relative to the largest row")
+        XCTAssertEqual(rows[0].share, 1200.0 / 2200.0, accuracy: 0.0001)
+        XCTAssertEqual(rows.count, 3, "no aggregate row for 3 entries")
+    }
+
+    func testRankFoldsTailIntoOthersOnlyWhenItSavesARow() {
+        let color = UsageTool.claude.color
+        let five = (1...5).map { (name: "p\($0)", tokens: $0 * 100, color: color) }
+        let ranked = UsageRankingBuilder.rank(five)
+        XCTAssertEqual(ranked.count, 4, "top 3 + one aggregate")
+        XCTAssertEqual(ranked.last!.tokens, 300, "aggregate sums the folded tail (100 + 200)")
+
+        let four = (1...4).map { (name: "p\($0)", tokens: $0 * 100, color: color) }
+        XCTAssertEqual(UsageRankingBuilder.rank(four).count, 4, "folding one row would just rename it")
+        XCTAssertTrue(UsageRankingBuilder.rank([]).isEmpty)
+    }
+
+    func testToolRowsGroupDetailRowsByTool() {
+        let snapshot = SampleUsageStatsProvider.snapshot(now: Date())
+        let rows = UsageRankingBuilder.toolRows(fromDetail: snapshot.detailRows)
+        XCTAssertEqual(rows.first?.name, "Claude Code", "the two Claude model rows merge into one tool row")
+        XCTAssertEqual(rows.first?.tokens, 1_900_000 + 8_600_000 + 310_000 + 720_000)
+        let shareSum = rows.reduce(0.0) { $0 + $1.share }
+        XCTAssertEqual(shareSum, 1.0, accuracy: 0.0001, "shares cover the whole ranking even with an aggregate row")
+    }
+
+    func testSampleSnapshotCarriesRankings() {
+        let snapshot = SampleUsageStatsProvider.snapshot(now: Date())
+        XCTAssertFalse(snapshot.topProjects.isEmpty)
+        XCTAssertFalse(snapshot.topTools.isEmpty)
+        XCTAssertEqual(snapshot.topProjects.first?.name, "CodeIsland")
+    }
 }

@@ -877,9 +877,43 @@ private struct AppearancePage: View {
                     Text(l10n["show_usage_badge"])
                     Text(l10n["show_usage_badge_desc"])
                 }
+                UsagePricingOverrideEditor()
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// Editor for the equivalent-cost price overrides (design: built-in price
+/// table updated per release, overridable in Settings). Free-form JSON with
+/// live validation; invalid text is kept (so the user can fix it) but ignored
+/// by the pricing engine.
+private struct UsagePricingOverrideEditor: View {
+    @ObservedObject private var l10n = L10n.shared
+    @AppStorage(SettingsKey.usagePricingOverrides) private var overridesJSON = SettingsDefaults.usagePricingOverrides
+
+    private var isValid: Bool {
+        UsagePriceTable.parseOverrides(json: overridesJSON) != nil
+    }
+
+    var body: some View {
+        DisclosureGroup {
+            TextEditor(text: $overridesJSON)
+                .font(.system(size: 11, design: .monospaced))
+                .frame(minHeight: 64, maxHeight: 120)
+                .scrollContentBackground(.hidden)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            if !isValid {
+                Text(l10n["usage_pricing_invalid"])
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        } label: {
+            Text(l10n["usage_pricing_override"])
+            Text(l10n["usage_pricing_override_desc"])
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 

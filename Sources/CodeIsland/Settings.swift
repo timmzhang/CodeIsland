@@ -83,6 +83,10 @@ enum SettingsKey {
     // Today-usage badge in the compact bar (L1, docs/design/token-usage.md)
     static let showUsageBadge = "showUsageBadge"
 
+    // Equivalent-cost price overrides: JSON {"<model keyword>": {"input":…, "output":…}}
+    // in $/MTok, layered over UsagePriceTable's built-in rules
+    static let usagePricingOverrides = "usagePricingOverrides"
+
     // Island collapsed width scale (percentage: 50–150, default 100)
     static let collapsedWidthScale = "collapsedWidthScale"
 
@@ -153,6 +157,8 @@ struct SettingsDefaults {
 
     static let showUsageBadge = true
 
+    static let usagePricingOverrides = ""
+
     static let collapsedWidthScale = 100  // percentage
 
     static let defaultSource = "claude"
@@ -219,6 +225,7 @@ class SettingsManager {
             SettingsKey.sessionGroupingMode: SettingsDefaults.sessionGroupingMode,
             SettingsKey.showToolStatus: SettingsDefaults.showToolStatus,
             SettingsKey.showUsageBadge: SettingsDefaults.showUsageBadge,
+            SettingsKey.usagePricingOverrides: SettingsDefaults.usagePricingOverrides,
             SettingsKey.collapsedWidthScale: SettingsDefaults.collapsedWidthScale,
             SettingsKey.esp32BridgeEnabled: SettingsDefaults.esp32BridgeEnabled,
             SettingsKey.esp32HeartbeatSeconds: SettingsDefaults.esp32HeartbeatSeconds,
