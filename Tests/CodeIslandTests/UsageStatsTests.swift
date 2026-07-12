@@ -27,6 +27,16 @@ final class UsageStatsTests: XCTestCase {
         XCTAssertEqual(UsageFormat.percent(0.914), "91.4%")
     }
 
+    // MARK: - Tool identifier mapping
+
+    func testToolDisplayNameFoldsProviderIdentifiers() {
+        // Providers report ids like "claude-code" (ClaudeUsageProvider.toolIdentifier)
+        XCTAssertEqual(usageToolDisplayName("claude-code"), "Claude")
+        XCTAssertEqual(usageToolDisplayName("claude"), "Claude")
+        XCTAssertEqual(usageToolDisplayName("codex"), "Codex")
+        XCTAssertEqual(usageToolDisplayName("trae"), "Trae")
+    }
+
     // MARK: - UsageTodaySnapshot.hasData
 
     func testEmptySnapshotHasNoData() {

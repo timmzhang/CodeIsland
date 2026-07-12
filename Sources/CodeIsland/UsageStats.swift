@@ -86,10 +86,20 @@ enum UsageFormat {
 
 // MARK: - Series colors (from docs/design/token-usage.md)
 
+/// Canonical family for a usage tool identifier. Providers report ids like
+/// "claude-code"; prefix matching folds them onto the design's five series.
+private func usageToolFamily(_ tool: String) -> String {
+    let lowered = tool.lowercased()
+    for family in ["claude", "codex", "gemini", "kimi", "qwen", "opencode"] where lowered.hasPrefix(family) {
+        return family
+    }
+    return lowered
+}
+
 /// Chart series color per tool — validated for color-blind distinction
 /// and contrast on the dark panel background.
 func usageToolColor(_ tool: String) -> Color {
-    switch tool.lowercased() {
+    switch usageToolFamily(tool) {
     case "claude": return Color(red: 0.851, green: 0.349, blue: 0.149)  // #d95926
     case "codex":  return Color(red: 0.098, green: 0.620, blue: 0.439)  // #199e70
     case "gemini": return Color(red: 0.224, green: 0.529, blue: 0.898)  // #3987e5
@@ -98,9 +108,9 @@ func usageToolColor(_ tool: String) -> Color {
     }
 }
 
-/// Display name for a session source id in usage lists
+/// Display name for a usage tool identifier in usage lists
 func usageToolDisplayName(_ tool: String) -> String {
-    switch tool.lowercased() {
+    switch usageToolFamily(tool) {
     case "claude": return "Claude"
     case "codex": return "Codex"
     case "gemini": return "Gemini"

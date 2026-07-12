@@ -95,7 +95,7 @@ enum DebugHarness {
         snapshot.cacheHitRate = 0.914
         snapshot.last7DayTokens = [1_200_000, 800_000, 1_600_000, 2_100_000, 1_500_000, 1_900_000, 2_030_000]
         snapshot.perTool = [
-            .init(tool: "claude", tokens: 1_420_000),
+            .init(tool: "claude-code", tokens: 1_420_000),
             .init(tool: "codex", tokens: 410_000),
             .init(tool: "gemini", tokens: 150_000),
             .init(tool: "kimi", tokens: 30_000),
