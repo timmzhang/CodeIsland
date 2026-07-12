@@ -17,22 +17,28 @@ public struct ConversationTailDelta: Equatable, Sendable {
     public let lastUserPrompt: String?
     public let lastAssistantMessage: String?
     public let permissionDecisions: [TranscriptPermissionDecision]
+    /// Token usage rows observed in the appended lines, in file order. Not yet
+    /// deduplicated — consumers run them through a `ClaudeUsageDeduplicator`.
+    public let usageEvents: [ClaudeUsageEvent]
 
     public init(
         sessionId: String,
         lastUserPrompt: String?,
         lastAssistantMessage: String?,
-        permissionDecisions: [TranscriptPermissionDecision] = []
+        permissionDecisions: [TranscriptPermissionDecision] = [],
+        usageEvents: [ClaudeUsageEvent] = []
     ) {
         self.sessionId = sessionId
         self.lastUserPrompt = lastUserPrompt
         self.lastAssistantMessage = lastAssistantMessage
         self.permissionDecisions = permissionDecisions
+        self.usageEvents = usageEvents
     }
 
     /// A delta only carries signal when at least one field is non-nil.
     public var isEmpty: Bool {
-        lastUserPrompt == nil && lastAssistantMessage == nil && permissionDecisions.isEmpty
+        lastUserPrompt == nil && lastAssistantMessage == nil
+            && permissionDecisions.isEmpty && usageEvents.isEmpty
     }
 }
 
@@ -205,7 +211,8 @@ public final class JSONLTailer: @unchecked Sendable {
                 sessionId: watch.sessionId,
                 lastUserPrompt: scan.delta.lastUserPrompt,
                 lastAssistantMessage: scan.delta.lastAssistantMessage,
-                permissionDecisions: scan.delta.permissionDecisions
+                permissionDecisions: scan.delta.permissionDecisions,
+                usageEvents: scan.delta.usageEvents
             )
             onDelta(delta)
         }
@@ -239,10 +246,12 @@ public final class JSONLTailer: @unchecked Sendable {
             public var lastUserPrompt: String?
             public var lastAssistantMessage: String?
             public var permissionDecisions: [TranscriptPermissionDecision] = []
+            public var usageEvents: [ClaudeUsageEvent] = []
             public var isEmpty: Bool {
                 lastUserPrompt == nil
                     && lastAssistantMessage == nil
                     && permissionDecisions.isEmpty
+                    && usageEvents.isEmpty
             }
         }
         public let delta: Delta
@@ -315,6 +324,9 @@ public final class JSONLTailer: @unchecked Sendable {
         case "assistant":
             if let text = extractText(from: message["content"]) {
                 delta.lastAssistantMessage = text
+            }
+            if let event = ClaudeUsageEvent.from(line: json) {
+                delta.usageEvents.append(event)
             }
         default:
             break

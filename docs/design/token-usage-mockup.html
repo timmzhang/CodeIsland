@@ -1,0 +1,526 @@
+<title>CodeIsland Token 用量 · 视觉稿 V1</title>
+<style>
+  :root {
+    --bg: #f4f3ef;
+    --ink: #1c1d20;
+    --ink-2: #5c5e66;
+    --ink-3: #8b8d96;
+    --accent: #c24d1f;
+    --frame-border: #dcdad2;
+    --frame-bg: #fbfaf7;
+    /* mock 世界：notch 永远是深色，不随页面主题变 */
+    --m-black: #000000;
+    --m-win: #111318;
+    --m-card: #181c23;
+    --m-card2: #1d222b;
+    --m-border: #2a303c;
+    --m-ink: #e8eaed;
+    --m-ink2: #9aa0aa;
+    --m-ink3: #6b7280;
+    --c-claude: #d95926;
+    --c-codex: #199e70;
+    --c-gemini: #3987e5;
+    --c-kimi: #c98500;
+    --c-other: #9085e9;
+    --good: #0ca30c;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d0e12; --ink:#e6e6e3; --ink-2:#a0a2ab; --ink-3:#70727c; --accent:#e07a4a; --frame-border:#252831; --frame-bg:#14161c; }
+  }
+  :root[data-theme="dark"] { --bg:#0d0e12; --ink:#e6e6e3; --ink-2:#a0a2ab; --ink-3:#70727c; --accent:#e07a4a; --frame-border:#252831; --frame-bg:#14161c; }
+  :root[data-theme="light"] { --bg:#f4f3ef; --ink:#1c1d20; --ink-2:#5c5e66; --ink-3:#8b8d96; --accent:#c24d1f; --frame-border:#dcdad2; --frame-bg:#fbfaf7; }
+
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.7; margin: 0; padding: 48px 24px 96px; }
+  .wrap { max-width: 920px; margin: 0 auto; display: flex; flex-direction: column; gap: 72px; }
+
+  header .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); margin-bottom: 14px; }
+  h1 { font-family: var(--mono); font-size: clamp(26px, 4vw, 34px); line-height: 1.25; margin: 0 0 16px; text-wrap: balance; font-weight: 700; }
+  h2 { font-family: var(--mono); font-size: 19px; margin: 0 0 6px; font-weight: 700; }
+  .lede { max-width: 62ch; color: var(--ink-2); margin: 0; }
+  .sec-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 20px; }
+  .sec-head .tag { font-family: var(--mono); font-size: 11px; letter-spacing: .14em; color: var(--accent); }
+  .sec-head p { margin: 4px 0 0; color: var(--ink-2); max-width: 68ch; font-size: 14px; }
+
+  /* ── 设备/窗口外框 ── */
+  .device { border: 1px solid var(--frame-border); background: var(--frame-bg); border-radius: 14px; padding: 22px; }
+  .macwin { background: var(--m-win); border-radius: 10px; border: 1px solid var(--m-border); overflow: hidden; box-shadow: 0 18px 44px rgba(0,0,0,.35); }
+  .titlebar { display: flex; align-items: center; gap: 8px; padding: 11px 14px; border-bottom: 1px solid var(--m-border); }
+  .titlebar .dot { width: 11px; height: 11px; border-radius: 50%; }
+  .titlebar .t { font-family: var(--mono); font-size: 11.5px; color: var(--m-ink2); margin-left: 8px; }
+
+  /* ── L1: notch ── */
+  .desk { border-radius: 10px; overflow: hidden; background: linear-gradient(135deg, #2b3550 0%, #4a3b63 55%, #7a4658 100%); padding: 0 0 34px; }
+  .menubar { display: flex; justify-content: space-between; align-items: center; height: 30px; padding: 0 14px; background: rgba(10,10,14,.42); backdrop-filter: blur(4px); font-family: var(--mono); font-size: 10.5px; color: rgba(255,255,255,.75); }
+  .notch-zone { display: flex; justify-content: center; margin-top: -30px; pointer-events: none; }
+  .notch { pointer-events: auto; background: var(--m-black); color: var(--m-ink); border-radius: 0 0 14px 14px; display: flex; align-items: center; gap: 12px; padding: 5px 16px 6px; font-family: var(--mono); font-size: 11px; min-height: 30px; }
+  .notch .sess { display: flex; align-items: center; gap: 7px; }
+  .notch .sep { width: 1px; height: 14px; background: #333a46; }
+  .badge-today { display: flex; align-items: baseline; gap: 6px; color: var(--m-ink); }
+  .badge-today .num { font-weight: 700; font-size: 12.5px; }
+  .badge-today .cost { color: var(--m-ink2); font-size: 10.5px; }
+  .spark { display: flex; align-items: flex-end; gap: 2px; height: 14px; }
+  .spark i { width: 3px; background: #3f4756; border-radius: 1px; display: block; }
+  .spark i.hi { background: var(--c-claude); }
+
+  .notch-expanded { margin: 26px auto 0; width: 380px; background: var(--m-black); border-radius: 16px; padding: 12px 16px 12px; font-family: var(--mono); box-shadow: 0 20px 50px rgba(0,0,0,.5); }
+  .nx-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid #22262e; }
+  .nx-toolbar .lft { color: var(--m-ink2); font-size: 10.5px; }
+  .nx-entry { color: var(--m-ink); font-size: 11px; cursor: pointer; display: inline-flex; align-items: baseline; gap: 5px; }
+  .nx-entry .lab { color: var(--m-ink2); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: #4a505c; }
+  .nx-entry .num { font-weight: 700; font-size: 12px; }
+  .nx-entry:hover .lab { color: var(--m-ink); text-decoration-color: var(--m-ink2); }
+  .nx-gear { color: var(--m-ink3); font-size: 12px; }
+  .nx-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+  .nx-head .h { color: var(--m-ink); font-size: 11.5px; font-weight: 700; }
+  .nx-head .sub { color: var(--m-ink3); font-size: 10px; }
+  .nx-row { display: flex; align-items: center; gap: 9px; padding: 5.5px 0; font-size: 11px; color: var(--m-ink); }
+  .nx-row .bar-bg { flex: 1; height: 5px; border-radius: 2.5px; background: #23272f; overflow: hidden; }
+  .nx-row .bar-fg { height: 100%; border-radius: 2.5px; }
+  .nx-row .val { width: 74px; text-align: right; color: var(--m-ink2); font-variant-numeric: tabular-nums; font-size: 10.5px; }
+  .nx-foot { display: flex; justify-content: space-between; border-top: 1px solid #22262e; margin-top: 9px; padding-top: 9px; font-size: 10px; color: var(--m-ink3); }
+  .nx-foot .link { color: var(--c-gemini); cursor: pointer; }
+
+  .px { display: inline-grid; grid-template-columns: repeat(5, 3px); grid-auto-rows: 3px; image-rendering: pixelated; }
+  .px i { display: block; }
+
+  /* ── L2: 统计窗口 ── */
+  .stats-body { padding: 18px 20px 20px; font-family: var(--mono); }
+  .stats-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px; }
+  .seg { display: inline-flex; background: var(--m-card); border: 1px solid var(--m-border); border-radius: 7px; padding: 2px; }
+  .seg button { all: unset; cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--m-ink2); padding: 4px 14px; border-radius: 5px; }
+  .seg button[aria-pressed="true"] { background: #2c3340; color: var(--m-ink); font-weight: 700; }
+  .seg button:focus-visible { outline: 2px solid var(--c-gemini); }
+  .range { font-size: 11px; color: var(--m-ink3); }
+
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 18px; }
+  .tile { background: var(--m-card); border: 1px solid var(--m-border); border-radius: 9px; padding: 12px 14px; }
+  .tile .k { font-size: 10px; color: var(--m-ink3); letter-spacing: .08em; margin-bottom: 6px; }
+  .tile .v { font-size: 20px; font-weight: 700; color: var(--m-ink); font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .tile .v small { font-size: 11px; font-weight: 400; color: var(--m-ink2); }
+  .tile .d { font-size: 10px; margin-top: 4px; color: var(--m-ink3); }
+  .tile .d .up { color: var(--good); }
+
+  .chart-card { background: var(--m-card); border: 1px solid var(--m-border); border-radius: 9px; padding: 14px 16px 10px; margin-bottom: 18px; position: relative; }
+  .chart-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; flex-wrap: wrap; gap: 6px; }
+  .chart-head .t { font-size: 11.5px; font-weight: 700; color: var(--m-ink); }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 10.5px; color: var(--m-ink2); }
+  .legend .it { display: inline-flex; align-items: center; gap: 5px; }
+  .legend .sw { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  #chart { width: 100%; height: auto; display: block; }
+  .tooltip { position: absolute; pointer-events: none; background: #0b0d11; border: 1px solid #363d4a; border-radius: 7px; padding: 8px 11px; font-size: 10.5px; color: var(--m-ink); opacity: 0; transition: opacity .12s; z-index: 5; min-width: 130px; box-shadow: 0 8px 20px rgba(0,0,0,.5); }
+  @media (prefers-reduced-motion: reduce) { .tooltip { transition: none; } }
+  .tooltip .tt-d { color: var(--m-ink3); margin-bottom: 3px; }
+  .tooltip .tt-row { display: flex; justify-content: space-between; gap: 14px; font-variant-numeric: tabular-nums; }
+
+  .tbl-wrap { overflow-x: auto; background: var(--m-card); border: 1px solid var(--m-border); border-radius: 9px; }
+  table { border-collapse: collapse; width: 100%; font-size: 11px; min-width: 640px; }
+  th { text-align: right; font-weight: 400; color: var(--m-ink3); font-size: 10px; letter-spacing: .06em; padding: 10px 12px 8px; border-bottom: 1px solid var(--m-border); white-space: nowrap; }
+  th:first-child { text-align: left; }
+  td { text-align: right; padding: 8px 12px; color: var(--m-ink); font-variant-numeric: tabular-nums; border-bottom: 1px solid #1e232c; white-space: nowrap; }
+  td:first-child { text-align: left; }
+  tr:last-child td { border-bottom: none; }
+  td .chip { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 7px; vertical-align: baseline; }
+  td .mdl { color: var(--m-ink2); font-size: 10px; }
+  .share { display: inline-block; width: 64px; height: 5px; border-radius: 2.5px; background: #23272f; vertical-align: middle; overflow: hidden; }
+  .share i { display: block; height: 100%; border-radius: 2.5px; }
+  .foot-note { font-size: 10px; color: var(--m-ink3); padding: 10px 2px 0; }
+  tfoot td { color: var(--m-ink); font-weight: 700; border-top: 1px solid var(--m-border); }
+
+  /* ── L3: 周报 ── */
+  .report-body { padding: 20px; font-family: var(--mono); display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .rp-hero { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: flex-end; background: linear-gradient(120deg, #1a1f28, #171b22); border: 1px solid var(--m-border); border-radius: 9px; padding: 16px 18px; flex-wrap: wrap; gap: 12px; }
+  .rp-hero .big { font-size: 30px; font-weight: 700; color: var(--m-ink); line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .rp-hero .big small { font-size: 12px; color: var(--m-ink2); font-weight: 400; }
+  .rp-hero .k { font-size: 10px; color: var(--m-ink3); letter-spacing: .08em; margin-bottom: 6px; }
+  .rp-hero .delta { color: var(--good); font-size: 11.5px; }
+  .rp-hero .sub { color: var(--m-ink3); font-size: 10.5px; margin-top: 3px; }
+  .rp-card { background: var(--m-card); border: 1px solid var(--m-border); border-radius: 9px; padding: 14px 16px; }
+  .rp-card .h { font-size: 11px; font-weight: 700; color: var(--m-ink); margin-bottom: 10px; }
+  .hrow { display: flex; align-items: center; gap: 9px; font-size: 10.5px; color: var(--m-ink); padding: 4px 0; }
+  .hrow .nm { width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hrow .hb-bg { flex: 1; height: 6px; background: #23272f; border-radius: 3px; overflow: hidden; }
+  .hrow .hb { height: 100%; border-radius: 3px; }
+  .hrow .v { width: 56px; text-align: right; color: var(--m-ink2); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .heat { display: grid; grid-template-columns: 26px repeat(12, 1fr); gap: 3px; align-items: center; }
+  .heat .lab { font-size: 9px; color: var(--m-ink3); }
+  .heat .cell { aspect-ratio: 1.4; border-radius: 2px; }
+  .heat-x { display: grid; grid-template-columns: 26px repeat(12, 1fr); gap: 3px; margin-top: 4px; }
+  .heat-x span { font-size: 8.5px; color: var(--m-ink3); text-align: center; }
+
+  /* ── 决策点 ── */
+  .decisions { display: flex; flex-direction: column; gap: 14px; counter-reset: dq; }
+  .dq { border: 1px solid var(--frame-border); background: var(--frame-bg); border-radius: 12px; padding: 16px 20px; }
+  .dq::before { counter-increment: dq; content: "Q" counter(dq); font-family: var(--mono); font-size: 11px; color: var(--accent); font-weight: 700; letter-spacing: .1em; }
+  .dq h3 { font-size: 14.5px; margin: 6px 0 6px; font-family: var(--mono); }
+  .dq p { margin: 0; font-size: 13.5px; color: var(--ink-2); max-width: 70ch; }
+  .dq .rec { color: var(--accent); font-weight: 600; }
+
+  .note { font-size: 12.5px; color: var(--ink-3); border-left: 2px solid var(--frame-border); padding-left: 14px; max-width: 70ch; }
+  @media (max-width: 720px) {
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+    .report-body { grid-template-columns: 1fr; }
+    .device { padding: 12px; }
+  }
+</style>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">CodeIsland · p-wb9y · 视觉稿 V1 · 2026-07-11</div>
+  <h1>Token 用量与数据洞察</h1>
+  <p class="lede">三层信息架构：notch 面板只回答「今天烧了多少」，统计窗口承载完整报表，周报卡片给洞察。以下 mock 全部使用接近真实的模拟数据，深色为产品固有形态（notch 世界没有浅色）。页面末尾是需要拍板的 5 个决策点。</p>
+</header>
+
+<!-- ═══════════ L1 ═══════════ -->
+<section>
+  <div class="sec-head">
+    <span class="tag">L1 · NOTCH 面板</span>
+    <h2>今日摘要 — 常驻一眼可见</h2>
+    <p>收起态在现有会话状态右侧追加「今日用量」徽标：token 总量 + 等效成本 + 近 7 日迷你柱（今天高亮）。展开态顶部工具栏<b>右上角</b>放「今日 token 燃烧 2.03M」下划线入口（✅ 已拍板，参考竞品样式）——点击打开 L2 统计窗口；下方分区按工具列今日小计条。</p>
+  </div>
+  <div class="device">
+    <div class="desk">
+      <div class="menubar"><span>&#63743; CodeIsland</span><span>Fri Jul 11 &nbsp;20:42</span></div>
+      <div class="notch-zone">
+        <div class="notch">
+          <span class="sess">
+            <span class="px" aria-hidden="true">
+              <i></i><i style="background:#d95926"></i><i style="background:#d95926"></i><i style="background:#d95926"></i><i></i>
+              <i style="background:#d95926"></i><i style="background:#f0e6dd"></i><i style="background:#d95926"></i><i style="background:#f0e6dd"></i><i style="background:#d95926"></i>
+              <i style="background:#d95926"></i><i style="background:#d95926"></i><i style="background:#d95926"></i><i style="background:#d95926"></i><i style="background:#d95926"></i>
+              <i></i><i style="background:#a8431c"></i><i style="background:#d95926"></i><i style="background:#a8431c"></i><i></i>
+            </span>
+            <span style="color:#e8eaed">claude · working</span>
+          </span>
+          <span class="sep"></span>
+          <span class="badge-today">
+            <span class="spark" aria-hidden="true"><i style="height:8px"></i><i style="height:5px"></i><i style="height:11px"></i><i style="height:14px"></i><i style="height:10px"></i><i style="height:13px"></i><i class="hi" style="height:7px"></i></span>
+            <span class="num">2.03M</span><span class="cost">≈$3.87</span>
+          </span>
+        </div>
+      </div>
+
+      <div class="notch-expanded">
+        <div class="nx-toolbar">
+          <span class="lft">3 个活跃会话</span>
+          <span style="display:inline-flex;align-items:center;gap:12px">
+            <span class="nx-entry" role="button" tabindex="0"><span class="lab">今日 token 燃烧</span><span class="num">2.03M</span></span>
+            <span class="nx-gear" aria-hidden="true">⚙</span>
+          </span>
+        </div>
+        <div class="nx-head"><span class="h">今日 Token 用量</span><span class="sub">07-11 · 不含 cache 读</span></div>
+        <div class="nx-row"><span class="chip" style="background:var(--c-claude);width:8px;height:8px;border-radius:2px"></span>Claude<span class="bar-bg"><span class="bar-fg" style="width:70%;background:var(--c-claude)"></span></span><span class="val">1.42M</span></div>
+        <div class="nx-row"><span class="chip" style="background:var(--c-codex);width:8px;height:8px;border-radius:2px"></span>Codex<span class="bar-bg"><span class="bar-fg" style="width:20%;background:var(--c-codex)"></span></span><span class="val">410K</span></div>
+        <div class="nx-row"><span class="chip" style="background:var(--c-gemini);width:8px;height:8px;border-radius:2px"></span>Gemini<span class="bar-bg"><span class="bar-fg" style="width:7%;background:var(--c-gemini)"></span></span><span class="val">150K</span></div>
+        <div class="nx-row"><span class="chip" style="background:var(--c-kimi);width:8px;height:8px;border-radius:2px"></span>Kimi<span class="bar-bg"><span class="bar-fg" style="width:2%;background:var(--c-kimi)"></span></span><span class="val">30K</span></div>
+        <div class="nx-foot"><span>cache 命中 91.4%</span><span>≈$3.87 等效成本</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ L2 ═══════════ -->
+<section>
+  <div class="sec-head">
+    <span class="tag">L2 · 统计窗口</span>
+    <h2>用量报表 — 日/周切换 · 可交互</h2>
+    <p>独立窗口（与 Settings 同级）。顶部汇总卡，中间按工具堆叠的柱状图（<b>图表可切换日/周、柱子可悬停看明细</b>），底部为 工具 × 模型 明细表。图表口径为 input + output tokens，cache 读写在表格中单独分列。</p>
+  </div>
+  <div class="device">
+    <div class="macwin">
+      <div class="titlebar">
+        <span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span>
+        <span class="t">CodeIsland — Token 用量</span>
+      </div>
+      <div class="stats-body">
+        <div class="stats-top">
+          <div class="seg" role="group" aria-label="时间粒度">
+            <button id="btnDay" aria-pressed="true">日</button>
+            <button id="btnWeek" aria-pressed="false">周</button>
+          </div>
+          <span class="range" id="rangeLabel">2026-07-05 → 07-11</span>
+        </div>
+
+        <div class="tiles">
+          <div class="tile"><div class="k">今日 TOKENS</div><div class="v">2.03M</div><div class="d"><span class="up">▲ 12%</span> vs 昨日同时段</div></div>
+          <div class="tile"><div class="k">等效 API 成本</div><div class="v">$3.87</div><div class="d">本周累计 $31.20</div></div>
+          <div class="tile"><div class="k">CACHE 命中率</div><div class="v">91.4<small>%</small></div><div class="d">读 38.2M / 写 3.4M</div></div>
+          <div class="tile"><div class="k">活跃会话</div><div class="v">14</div><div class="d">4 个工具在用</div></div>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-head">
+            <span class="t" id="chartTitle">每日 Token 消耗 · 按工具</span>
+            <div class="legend" id="legend"></div>
+          </div>
+          <svg id="chart" viewBox="0 0 820 260" role="img" aria-label="按工具堆叠的每日 token 消耗柱状图"></svg>
+          <div class="tooltip" id="tip"></div>
+        </div>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr>
+              <th>工具 / 模型</th><th>Input</th><th>Output</th><th>Cache 写</th><th>Cache 读</th><th>等效成本</th><th>占比</th>
+            </tr></thead>
+            <tbody>
+              <tr><td><span class="chip" style="background:var(--c-claude)"></span>Claude Code <span class="mdl">claude-fable-5</span></td><td>1.9M</td><td>8.6M</td><td>2.1M</td><td>26.4M</td><td>$21.40</td><td><span class="share"><i style="width:68%;background:var(--c-claude)"></i></span></td></tr>
+              <tr><td><span class="chip" style="background:var(--c-claude)"></span>Claude Code <span class="mdl">claude-haiku-4-5</span></td><td>310K</td><td>720K</td><td>96K</td><td>1.8M</td><td>$1.10</td><td><span class="share"><i style="width:7%;background:var(--c-claude)"></i></span></td></tr>
+              <tr><td><span class="chip" style="background:var(--c-codex)"></span>Codex <span class="mdl">gpt-5-codex</span></td><td>820K</td><td>2.4M</td><td>410K</td><td>6.2M</td><td>$5.60</td><td><span class="share"><i style="width:19%;background:var(--c-codex)"></i></span></td></tr>
+              <tr><td><span class="chip" style="background:var(--c-gemini)"></span>Gemini CLI <span class="mdl">gemini-2.5-pro</span></td><td>280K</td><td>760K</td><td>—</td><td>2.9M</td><td>$1.90</td><td><span class="share"><i style="width:5%;background:var(--c-gemini)"></i></span></td></tr>
+              <tr><td><span class="chip" style="background:var(--c-kimi)"></span>Kimi CLI <span class="mdl">kimi-k2</span></td><td>96K</td><td>210K</td><td>—</td><td>870K</td><td>$0.60</td><td><span class="share"><i style="width:1%;background:var(--c-kimi)"></i></span></td></tr>
+            </tbody>
+            <tfoot><tr><td>本周合计</td><td>3.4M</td><td>12.7M</td><td>2.6M</td><td>38.2M</td><td>$30.60</td><td></td></tr></tfoot>
+          </table>
+        </div>
+        <div class="foot-note">＊ 等效成本按各模型 API 牌价折算，订阅（Pro / Max）用户实际不按此付费——它表示「同样的用量走 API 要花多少」。价格表可在设置中更新。Cursor / Copilot 等 IDE 内工具暂无法统计，未列入。</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ L3 ═══════════ -->
+<section>
+  <div class="sec-head">
+    <span class="tag">L3 · 周报洞察</span>
+    <h2>本周洞察卡 — 给「体感」的一层</h2>
+    <p>统计窗口内的第二个 tab（或每周一自动弹出的摘要通知）。回答三个问题：这周烧了多少、烧在了哪里、什么时候烧的。文案可一键复制为周报素材。</p>
+  </div>
+  <div class="device">
+    <div class="macwin">
+      <div class="titlebar">
+        <span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span>
+        <span class="t">CodeIsland — 本周洞察 · 07-05 → 07-11</span>
+      </div>
+      <div class="report-body">
+        <div class="rp-hero">
+          <div>
+            <div class="k">本周 TOKEN 消耗</div>
+            <div class="big">16.1M <small>tokens</small></div>
+            <div class="sub">≈ $30.60 等效 API 成本 · 92 个会话</div>
+          </div>
+          <div style="text-align:right">
+            <div class="delta">▲ 23% vs 上周</div>
+            <div class="sub">日均 2.3M · 峰值周二 4.7M</div>
+          </div>
+        </div>
+
+        <div class="rp-card">
+          <div class="h">Top 项目</div>
+          <div class="hrow"><span class="nm">CodeIsland</span><span class="hb-bg"><span class="hb" style="width:88%;background:var(--c-claude)"></span></span><span class="v">6.2M</span></div>
+          <div class="hrow"><span class="nm">pins</span><span class="hb-bg"><span class="hb" style="width:54%;background:var(--c-claude)"></span></span><span class="v">3.8M</span></div>
+          <div class="hrow"><span class="nm">LarkMail</span><span class="hb-bg"><span class="hb" style="width:34%;background:var(--c-claude)"></span></span><span class="v">2.4M</span></div>
+          <div class="hrow"><span class="nm">其他 6 个</span><span class="hb-bg"><span class="hb" style="width:52%;background:#3f4756"></span></span><span class="v">3.7M</span></div>
+        </div>
+
+        <div class="rp-card">
+          <div class="h">Top 工具</div>
+          <div class="hrow"><span class="nm">Claude Code</span><span class="hb-bg"><span class="hb" style="width:88%;background:var(--c-claude)"></span></span><span class="v">71%</span></div>
+          <div class="hrow"><span class="nm">Codex</span><span class="hb-bg"><span class="hb" style="width:24%;background:var(--c-codex)"></span></span><span class="v">19%</span></div>
+          <div class="hrow"><span class="nm">Gemini CLI</span><span class="hb-bg"><span class="hb" style="width:8%;background:var(--c-gemini)"></span></span><span class="v">6%</span></div>
+          <div class="hrow"><span class="nm">Kimi + 其他</span><span class="hb-bg"><span class="hb" style="width:5%;background:var(--c-kimi)"></span></span><span class="v">4%</span></div>
+        </div>
+
+        <div class="rp-card" style="grid-column: 1 / -1">
+          <div class="h">活跃时段 · 每格 2 小时</div>
+          <div class="heat" id="heat"></div>
+          <div class="heat-x"><span></span><span>0</span><span>2</span><span>4</span><span>6</span><span>8</span><span>10</span><span>12</span><span>14</span><span>16</span><span>18</span><span>20</span><span>22</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 决策点 ═══════════ -->
+<section>
+  <div class="sec-head">
+    <span class="tag">评审结论 · 2026-07-11 全部拍板</span>
+    <h2>5 个决策点 — 已定稿</h2>
+  </div>
+  <div class="decisions">
+    <div class="dq">
+      <h3>cache 读要不要计入主图？ <span style="color:var(--good);font-size:12px">✅ 已拍板</span></h3>
+      <p>主图只画 input + output，cache 读写进汇总卡和明细表（cache 读单价约为 input 的 1/10、量级又大 10 倍以上，混入主图柱子会失真）。本稿即此口径。</p>
+    </div>
+    <div class="dq">
+      <h3>成本数字怎么标？ <span style="color:var(--good);font-size:12px">✅ 已拍板</span></h3>
+      <p>统一叫「等效 API 成本」并加脚注（订阅用户实际不按此付费，它表示"同样用量走 API 要花多少"）——同时是"订阅回本了多少"的爽点。</p>
+    </div>
+    <div class="dq">
+      <h3>L1 徽标常驻还是悬停出现？ <span style="color:var(--good);font-size:12px">✅ 已拍板</span></h3>
+      <p>默认常驻（数字 + 迷你柱约 90pt 宽），设置里可关。</p>
+    </div>
+    <div class="dq">
+      <h3>统计窗口入口放哪？ <span style="color:var(--good);font-size:12px">✅ 已拍板</span></h3>
+      <p>放在<b>展开面板右上角</b>：下划线文字「今日 token 燃烧 2.03M」，点击打开统计窗口（参考竞品截图样式，2026-07-11 拍板）。L1 mock 已按此更新。</p>
+    </div>
+    <div class="dq">
+      <h3>统计不到的工具（Cursor / Copilot 等 IDE 类）怎么表达？ <span style="color:var(--good);font-size:12px">✅ 已拍板</span></h3>
+      <p>不在图表中出现，仅在明细表脚注声明「未列入」。</p>
+    </div>
+  </div>
+  <p class="note">技术侧回顾：数据源为 Claude Code transcript 的 usage 字段（已验证）+ Codex app-server token 事件；SQLite 存小时级聚合；图表用 SwiftUI Charts 原生实现，本稿的布局与配色可直接翻译。配色已通过色盲安全 / 对比度校验（暗面 #111318，5 系列全部通过）。</p>
+</section>
+
+</div>
+
+<script>
+(function () {
+  const C = { claude: "#d95926", codex: "#199e70", gemini: "#3987e5", kimi: "#c98500", other: "#9085e9" };
+  const TOOLS = [
+    { id: "claude", name: "Claude" }, { id: "codex", name: "Codex" },
+    { id: "gemini", name: "Gemini" }, { id: "kimi", name: "Kimi" }, { id: "other", name: "其他" }
+  ];
+  // 单位：K tokens（input+output）
+  const DAY = {
+    title: "每日 Token 消耗 · 按工具", range: "2026-07-05 → 07-11",
+    cols: ["07-05 六", "07-06 日", "07-07 一", "07-08 二", "07-09 三", "07-10 四", "07-11 五"],
+    rows: [
+      { claude: 1840, codex: 620, gemini: 210, kimi: 90, other: 40 },
+      { claude: 950,  codex: 300, gemini: 80,  kimi: 0,  other: 20 },
+      { claude: 2610, codex: 880, gemini: 340, kimi: 120, other: 60 },
+      { claude: 3120, codex: 1040, gemini: 280, kimi: 200, other: 80 },
+      { claude: 2260, codex: 760, gemini: 420, kimi: 60, other: 30 },
+      { claude: 2980, codex: 1180, gemini: 190, kimi: 140, other: 50 },
+      { claude: 1420, codex: 410, gemini: 150, kimi: 30, other: 20 }
+    ]
+  };
+  const WEEK = {
+    title: "每周 Token 消耗 · 按工具", range: "近 8 周 · 至 2026-07-11",
+    cols: ["05-23", "05-30", "06-06", "06-13", "06-20", "06-27", "07-04", "07-11"],
+    rows: [
+      { claude: 8200, codex: 2100, gemini: 900, kimi: 300, other: 150 },
+      { claude: 9800, codex: 2600, gemini: 700, kimi: 450, other: 200 },
+      { claude: 7400, codex: 3100, gemini: 1200, kimi: 200, other: 100 },
+      { claude: 11200, codex: 2900, gemini: 800, kimi: 500, other: 260 },
+      { claude: 10100, codex: 3400, gemini: 1500, kimi: 350, other: 180 },
+      { claude: 12600, codex: 2800, gemini: 1100, kimi: 600, other: 240 },
+      { claude: 10900, codex: 3800, gemini: 900, kimi: 400, other: 210 },
+      { claude: 11180, codex: 5190, gemini: 1670, kimi: 640, other: 300 }
+    ]
+  };
+
+  const svg = document.getElementById("chart");
+  const tip = document.getElementById("tip");
+  const NS = "http://www.w3.org/2000/svg";
+  const fmt = k => k >= 1000 ? (k / 1000).toFixed(k >= 10000 ? 0 : 1) + "M" : k + "K";
+
+  function render(data) {
+    document.getElementById("chartTitle").textContent = data.title;
+    document.getElementById("rangeLabel").textContent = data.range;
+    svg.innerHTML = "";
+    const W = 820, H = 260, padL = 44, padR = 12, padT = 14, padB = 28;
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+    const totals = data.rows.map(r => TOOLS.reduce((s, t) => s + r[t.id], 0));
+    const rawMax = Math.max(...totals);
+    const step = rawMax > 20000 ? 10000 : rawMax > 8000 ? 4000 : 1000;
+    const yMax = Math.ceil(rawMax / step) * step;
+
+    for (let v = 0; v <= yMax; v += step) {
+      const y = padT + plotH - (v / yMax) * plotH;
+      const ln = document.createElementNS(NS, "line");
+      ln.setAttribute("x1", padL); ln.setAttribute("x2", W - padR);
+      ln.setAttribute("y1", y); ln.setAttribute("y2", y);
+      ln.setAttribute("stroke", v === 0 ? "#39404d" : "#232833");
+      ln.setAttribute("stroke-width", "1");
+      svg.appendChild(ln);
+      const tx = document.createElementNS(NS, "text");
+      tx.setAttribute("x", padL - 8); tx.setAttribute("y", y + 3.5);
+      tx.setAttribute("text-anchor", "end"); tx.setAttribute("fill", "#6b7280");
+      tx.setAttribute("font-size", "9.5"); tx.setAttribute("font-family", "ui-monospace, monospace");
+      tx.textContent = fmt(v);
+      svg.appendChild(tx);
+    }
+
+    const n = data.rows.length;
+    const slot = plotW / n, barW = Math.min(52, slot * 0.52);
+    data.rows.forEach((row, i) => {
+      const cx = padL + slot * i + slot / 2;
+      let yCursor = padT + plotH;
+      const segs = TOOLS.filter(t => row[t.id] > 0);
+      segs.forEach((t, si) => {
+        const h = (row[t.id] / yMax) * plotH;
+        const gap = si === 0 ? 0 : 2;
+        const isTop = si === segs.length - 1;
+        const y = yCursor - h;
+        const r = document.createElementNS(NS, "rect");
+        r.setAttribute("x", cx - barW / 2); r.setAttribute("y", y);
+        r.setAttribute("width", barW); r.setAttribute("height", Math.max(1.5, h - gap));
+        r.setAttribute("rx", isTop ? 4 : 1.5);
+        r.setAttribute("fill", C[t.id]);
+        r.style.cursor = "default";
+        r.addEventListener("mousemove", ev => showTip(ev, data.cols[i], t, row, totals[i]));
+        r.addEventListener("mouseleave", hideTip);
+        svg.appendChild(r);
+        yCursor = y;
+      });
+      const totalLab = document.createElementNS(NS, "text");
+      totalLab.setAttribute("x", cx); totalLab.setAttribute("y", yCursor - 6);
+      totalLab.setAttribute("text-anchor", "middle"); totalLab.setAttribute("fill", "#9aa0aa");
+      totalLab.setAttribute("font-size", "9.5"); totalLab.setAttribute("font-family", "ui-monospace, monospace");
+      totalLab.textContent = fmt(totals[i]);
+      svg.appendChild(totalLab);
+      const xLab = document.createElementNS(NS, "text");
+      xLab.setAttribute("x", cx); xLab.setAttribute("y", H - 8);
+      xLab.setAttribute("text-anchor", "middle"); xLab.setAttribute("fill", "#6b7280");
+      xLab.setAttribute("font-size", "9.5"); xLab.setAttribute("font-family", "ui-monospace, monospace");
+      xLab.textContent = data.cols[i];
+      svg.appendChild(xLab);
+    });
+  }
+
+  function showTip(ev, col, tool, row, total) {
+    const card = svg.closest(".chart-card");
+    const rect = card.getBoundingClientRect();
+    tip.innerHTML = '<div class="tt-d">' + col + "</div>" +
+      '<div class="tt-row"><span><span style="color:' + C[tool.id] + '">■</span> ' + tool.name + "</span><b>" + fmt(row[tool.id]) + "</b></div>" +
+      '<div class="tt-row" style="color:#6b7280;margin-top:2px"><span>当日合计</span><span>' + fmt(total) + "</span></div>";
+    tip.style.opacity = "1";
+    let x = ev.clientX - rect.left + 14, y = ev.clientY - rect.top - 10;
+    if (x + 160 > rect.width) x -= 180;
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  }
+  function hideTip() { tip.style.opacity = "0"; }
+
+  const legend = document.getElementById("legend");
+  TOOLS.forEach(t => {
+    const s = document.createElement("span");
+    s.className = "it";
+    s.innerHTML = '<span class="sw" style="background:' + C[t.id] + '"></span>' + t.name;
+    legend.appendChild(s);
+  });
+
+  const bd = document.getElementById("btnDay"), bw = document.getElementById("btnWeek");
+  bd.addEventListener("click", () => { bd.setAttribute("aria-pressed", "true"); bw.setAttribute("aria-pressed", "false"); render(DAY); });
+  bw.addEventListener("click", () => { bw.setAttribute("aria-pressed", "true"); bd.setAttribute("aria-pressed", "false"); render(WEEK); });
+  render(DAY);
+
+  // 活跃时段热力图：7 天 × 12 个 2 小时格，蓝色 sequential
+  const RAMP = ["#181d26", "#1c3252", "#215089", "#3987e5", "#86b6ef"];
+  const DAYS = ["一", "二", "三", "四", "五", "六", "日"];
+  const HEAT = [
+    [0,0,0,0,1,2,3,3,2,3,4,2],
+    [0,0,0,0,2,3,4,4,3,4,4,3],
+    [0,0,0,0,1,3,3,2,3,3,3,1],
+    [1,0,0,0,2,3,4,3,2,4,3,2],
+    [0,0,0,0,1,2,3,3,2,3,4,3],
+    [0,0,0,1,1,2,2,3,2,2,3,2],
+    [0,0,0,0,0,1,1,2,1,2,2,1]
+  ];
+  const heat = document.getElementById("heat");
+  HEAT.forEach((rowArr, d) => {
+    const lab = document.createElement("span");
+    lab.className = "lab"; lab.textContent = "周" + DAYS[d];
+    heat.appendChild(lab);
+    rowArr.forEach((v, h) => {
+      const c = document.createElement("span");
+      c.className = "cell";
+      c.style.background = RAMP[v];
+      c.title = "周" + DAYS[d] + " " + h * 2 + ":00–" + (h * 2 + 2) + ":00";
+      heat.appendChild(c);
+    });
+  });
+})();
+</script>
