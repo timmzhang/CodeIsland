@@ -171,6 +171,13 @@ final class L10n: ObservableObject {
         "unlimited": "Unlimited",
         "show_agent_details": "Show Agent Activity Details",
         "show_tool_status": "Detailed Tool Activity in Compact Bar",
+        "show_usage_badge": "Today's Usage Badge in Compact Bar",
+        "show_usage_badge_desc": "Today's tokens, equivalent cost, and a 7-day mini chart",
+        "usage_burn_today": "Today's token burn",
+        "usage_today_title": "Today's Token Usage",
+        "usage_excl_cache_reads": "excl. cache reads",
+        "usage_cache_hit": "cache hit",
+        "usage_equiv_cost": "equiv. cost",
 
         // Mascots
         "preview_status": "Preview Status",
@@ -481,6 +488,13 @@ final class L10n: ObservableObject {
         "unlimited": "不限制",
         "show_agent_details": "显示代理活动详情",
         "show_tool_status": "紧凑栏显示工具调用详情",
+        "show_usage_badge": "紧凑栏显示今日用量徽标",
+        "show_usage_badge_desc": "今日 token 总量、等效成本与近 7 日迷你柱",
+        "usage_burn_today": "今日 token 燃烧",
+        "usage_today_title": "今日 Token 用量",
+        "usage_excl_cache_reads": "不含 cache 读",
+        "usage_cache_hit": "cache 命中",
+        "usage_equiv_cost": "等效成本",
 
         // Mascots
         "preview_status": "预览状态",
@@ -791,6 +805,13 @@ final class L10n: ObservableObject {
         "unlimited": "無制限",
         "show_agent_details": "エージェント活動の詳細を表示",
         "show_tool_status": "コンパクトバーに詳細なツール活動を表示",
+        "show_usage_badge": "コンパクトバーに本日の使用量バッジを表示",
+        "show_usage_badge_desc": "本日のトークン総量・相当コスト・過去 7 日のミニチャート",
+        "usage_burn_today": "本日のトークン消費",
+        "usage_today_title": "本日のトークン使用量",
+        "usage_excl_cache_reads": "cache 読み込みを除く",
+        "usage_cache_hit": "cache ヒット",
+        "usage_equiv_cost": "相当コスト",
 
         // Mascots
         "preview_status": "プレビュー状態",
@@ -1101,6 +1122,13 @@ final class L10n: ObservableObject {
         "unlimited": "제한 없음",
         "show_agent_details": "에이전트 활동 세부 정보 표시",
         "show_tool_status": "압축 막대에 자세한 도구 활동 표시",
+        "show_usage_badge": "압축 막대에 오늘 사용량 배지 표시",
+        "show_usage_badge_desc": "오늘의 토큰 총량, 환산 비용, 최근 7일 미니 차트",
+        "usage_burn_today": "오늘 토큰 소모",
+        "usage_today_title": "오늘 토큰 사용량",
+        "usage_excl_cache_reads": "cache 읽기 제외",
+        "usage_cache_hit": "cache 적중",
+        "usage_equiv_cost": "환산 비용",
 
         // Mascots
         "preview_status": "미리보기 상태",
@@ -1411,6 +1439,13 @@ final class L10n: ObservableObject {
         "unlimited": "Sınırsız",
         "show_agent_details": "Ajan Aktivite Detaylarını Göster",
         "show_tool_status": "Kompakt Çubukta Ayrıntılı Araç Aktivitesi",
+        "show_usage_badge": "Kompakt Çubukta Bugünün Kullanım Rozeti",
+        "show_usage_badge_desc": "Bugünün token toplamı, eşdeğer maliyet ve 7 günlük mini grafik",
+        "usage_burn_today": "Bugünkü token tüketimi",
+        "usage_today_title": "Bugünkü Token Kullanımı",
+        "usage_excl_cache_reads": "cache okumaları hariç",
+        "usage_cache_hit": "cache isabet",
+        "usage_equiv_cost": "eşdeğer maliyet",
 
         // Mascots
         "preview_status": "Durumu Önizleme",

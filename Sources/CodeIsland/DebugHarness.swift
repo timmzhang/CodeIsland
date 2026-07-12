@@ -84,6 +84,23 @@ enum DebugHarness {
         case .idle: applyIdle(to: appState)
         case .stress: applyStress(to: appState)
         }
+        seedUsageSample()
+    }
+
+    /// Sample L1 usage data matching docs/design/token-usage-mockup.html
+    private static func seedUsageSample() {
+        var snapshot = UsageTodaySnapshot()
+        snapshot.totalTokens = 2_030_000
+        snapshot.equivalentCostUSD = 3.87
+        snapshot.cacheHitRate = 0.914
+        snapshot.last7DayTokens = [1_200_000, 800_000, 1_600_000, 2_100_000, 1_500_000, 1_900_000, 2_030_000]
+        snapshot.perTool = [
+            .init(tool: "claude", tokens: 1_420_000),
+            .init(tool: "codex", tokens: 410_000),
+            .init(tool: "gemini", tokens: 150_000),
+            .init(tool: "kimi", tokens: 30_000),
+        ]
+        UsageStatsModel.shared.update(snapshot)
     }
 
     // MARK: - Scenarios
