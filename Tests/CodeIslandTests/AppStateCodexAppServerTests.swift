@@ -29,7 +29,7 @@ final class AppStateCodexAppServerTests: XCTestCase {
         XCTAssertEqual(snapshot.status, .waitingQuestion)
     }
 
-    func testActiveWithoutFlagsMapsToRunningAndClearsTool() {
+    func testActiveWithoutFlagsMapsToProcessingAndClearsTool() {
         var snapshot = SessionSnapshot()
         snapshot.status = .waitingApproval
         snapshot.currentTool = "Bash"
@@ -40,7 +40,7 @@ final class AppStateCodexAppServerTests: XCTestCase {
             "activeFlags": .array([])
         ])
 
-        XCTAssertEqual(snapshot.status, .running)
+        XCTAssertEqual(snapshot.status, .processing)
         XCTAssertNil(snapshot.currentTool)
         XCTAssertNil(snapshot.toolDescription)
     }
