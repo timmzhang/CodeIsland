@@ -8,10 +8,8 @@ import SwiftUI
 final class UsageStatsWindowController {
     static let shared = UsageStatsWindowController()
 
-    /// Swap in a UsageStore-backed provider once end-to-end collection is
-    /// wired into the app (the store and per-tool providers already live in
-    /// CodeIslandCore); defaults to canned sample data so the window is
-    /// usable and reviewable before then.
+    /// The app delegate swaps in `UsageStoreStatsProvider` at launch; the
+    /// sample-data default remains for --preview runs and offscreen renders.
     var provider: UsageStatsProviding = SampleUsageStatsProvider()
 
     private var window: NSWindow?
