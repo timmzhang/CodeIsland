@@ -179,6 +179,66 @@ struct UsageStoreStatsProvider: UsageStatsProviding {
                 }
             )
             snapshot.topTools = UsageRankingBuilder.toolRows(fromDetail: snapshot.detailRows)
+
+            // Weekly insight (current week to date) -------------------------
+            // Days elapsed so far this week, so the average isn't skewed low
+            // early in the week (mirrors the "vs same time yesterday" idea below).
+            let elapsedDays = min(7, max(1, (calendar.dateComponents([.day], from: currentWeek.start, to: now).day ?? 0) + 1))
+
+            var heatGrid = Array(repeating: Array(repeating: 0, count: 12), count: 7)
+            for row in try store.totalsByHourAndTool(in: currentWeek) {
+                guard let date = dayKeyFormatter.date(from: String(row.dateHour.prefix(10))),
+                      let hour = Int(row.dateHour.suffix(2)) else { continue }
+                // Monday-first row index regardless of the calendar's first weekday.
+                let weekdayRow = (calendar.component(.weekday, from: date) + 5) % 7
+                heatGrid[weekdayRow][hour / 2] += Int(row.totals.chartTokens)
+            }
+            let heatMax = heatGrid.flatMap { $0 }.max() ?? 0
+            let heatmap = (0..<7).flatMap { weekday in
+                (0..<12).map { bucket -> UsageHeatmapCell in
+                    let tokens = heatGrid[weekday][bucket]
+                    return UsageHeatmapCell(
+                        weekday: weekday, hourBucket: bucket, tokens: tokens,
+                        intensity: heatMax > 0 ? Double(tokens) / Double(heatMax) : 0
+                    )
+                }
+            }
+
+            var dayTotals: [String: Int64] = [:]
+            for row in try store.totalsByDayAndTool(in: currentWeek) {
+                dayTotals[row.day, default: 0] += row.totals.chartTokens
+            }
+            var peakDayLabel = ""
+            var peakDayTokens = 0
+            if let peak = dayTotals.max(by: { $0.value < $1.value }), peak.value > 0,
+               let date = dayKeyFormatter.date(from: peak.key) {
+                let weekday = calendar.component(.weekday, from: date) - 1
+                peakDayLabel = weekdaySymbols.indices.contains(weekday) ? weekdaySymbols[weekday] : ""
+                peakDayTokens = Int(peak.value)
+            }
+
+            // vs the same elapsed portion of last week — same idea as the
+            // "same time yesterday" comparison above, one week further back.
+            var deltaVsLastWeek: Double?
+            if let lastWeekStart = calendar.date(byAdding: .weekOfYear, value: -1, to: currentWeek.start),
+               let lastWeekNow = calendar.date(byAdding: .weekOfYear, value: -1, to: now),
+               lastWeekNow > lastWeekStart {
+                let lastWeekTotals = try store.totals(in: DateInterval(start: lastWeekStart, end: lastWeekNow))
+                if lastWeekTotals.chartTokens > 0 {
+                    deltaVsLastWeek = Double(weekChartTotal - lastWeekTotals.chartTokens) / Double(lastWeekTotals.chartTokens)
+                }
+            }
+
+            snapshot.weeklyInsight = UsageWeeklyInsight(
+                weekTokens: Int(weekChartTotal),
+                weekCost: snapshot.summary.costWeekToDate,
+                deltaVsLastWeek: deltaVsLastWeek,
+                dailyAverageTokens: Int(weekChartTotal) / elapsedDays,
+                peakDayLabel: peakDayLabel,
+                peakDayTokens: peakDayTokens,
+                rangeLabel: "\(labelFormatter.string(from: currentWeek.start)) → \(labelFormatter.string(from: now))",
+                heatmap: heatmap
+            )
         }
 
         return snapshot

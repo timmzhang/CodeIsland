@@ -54,6 +54,18 @@ extension Color {
             opacity: 1
         )
     }
+
+    /// Linear-interpolates between two `usageHex` colors — the heatmap's
+    /// continuous blue ramp. (`Color.mix` needs macOS 15+; this target is 14.)
+    static func usageRamp(_ low: UInt32, _ high: UInt32, _ t: Double) -> Color {
+        let t = min(1, max(0, t))
+        func channel(_ shift: UInt32) -> Double {
+            let lo = Double((low >> shift) & 0xFF)
+            let hi = Double((high >> shift) & 0xFF)
+            return lo + (hi - lo) * t
+        }
+        return Color(.sRGB, red: channel(16) / 255, green: channel(8) / 255, blue: channel(0) / 255, opacity: 1)
+    }
 }
 
 // MARK: - Snapshot model (view-facing)
@@ -131,6 +143,8 @@ struct UsageStatsSnapshot: Sendable {
     var topProjects: [UsageRankRow] = []
     /// Top-tools ranking for the current week; empty hides the card.
     var topTools: [UsageRankRow] = []
+    /// L3 weekly-insight numbers (hero total/delta/avg/peak + activity heatmap).
+    var weeklyInsight = UsageWeeklyInsight()
 
     var detailTotalInput: Int { detailRows.reduce(0) { $0 + $1.input } }
     var detailTotalOutput: Int { detailRows.reduce(0) { $0 + $1.output } }
@@ -291,6 +305,88 @@ enum UsageRankingBuilder {
     }
 }
 
+// MARK: - Weekly insight (L3 tab)
+
+/// One 2-hour activity-heatmap cell: local weekday (Monday=0…Sunday=6) ×
+/// hour-of-day bucket (0…11, each spanning 2 hours from `hourBucket*2`).
+/// `intensity` is this cell's tokens relative to the grid's busiest cell —
+/// the view interpolates the design's blue monochrome ramp from it.
+struct UsageHeatmapCell: Identifiable, Sendable {
+    let weekday: Int
+    let hourBucket: Int
+    let tokens: Int
+    let intensity: Double
+
+    var id: String { "\(weekday)-\(hourBucket)" }
+}
+
+/// L3 "weekly insight" numbers: current-week total + delta vs last week,
+/// daily average and peak, and the activity heatmap. Top projects/tools
+/// reuse `UsageStatsSnapshot.topProjects`/`topTools`, which are already
+/// current-week scoped.
+struct UsageWeeklyInsight: Sendable {
+    var weekTokens: Int = 0
+    var weekCost: Double?
+    /// Fractional change vs the same elapsed portion of last week (0.23 = +23%); nil hides the delta line.
+    var deltaVsLastWeek: Double?
+    var dailyAverageTokens: Int = 0
+    var peakDayLabel: String = ""
+    var peakDayTokens: Int = 0
+    /// e.g. "07-06 → 07-12".
+    var rangeLabel: String = ""
+    /// Always 84 cells (7×12), zero-filled where there's no data.
+    var heatmap: [UsageHeatmapCell] = []
+
+    var hasData: Bool { weekTokens > 0 }
+}
+
+/// Builds the L3 "copy as text" weekly-report blurb. Pure and testable —
+/// the view only owns handing the result to the pasteboard.
+enum UsageInsightText {
+    static func build(snapshot: UsageStatsSnapshot, l10n: L10n) -> String {
+        let insight = snapshot.weeklyInsight
+        var lines: [String] = []
+
+        let tokens = UsageFormat.compactTokens(insight.weekTokens)
+        if let cost = insight.weekCost {
+            lines.append(String(format: l10n["usage_insight_copy_line1"], tokens, UsageFormat.equivalentCost(cost)))
+        } else {
+            lines.append(String(format: l10n["usage_insight_copy_line1_no_cost"], tokens))
+        }
+
+        if let delta = insight.deltaVsLastWeek {
+            let up = delta >= 0
+            let pct = "\(up ? "▲" : "▼") \(Int((abs(delta) * 100).rounded()))%"
+            lines.append(String(format: l10n["usage_insight_copy_delta"], pct))
+        }
+
+        if insight.dailyAverageTokens > 0 {
+            lines.append(String(
+                format: l10n["usage_insight_daily_avg_peak"],
+                UsageFormat.compactTokens(insight.dailyAverageTokens),
+                insight.peakDayLabel,
+                UsageFormat.compactTokens(insight.peakDayTokens)
+            ))
+        }
+
+        let sep = l10n["usage_insight_list_sep"]
+        if !snapshot.topProjects.isEmpty {
+            let joined = snapshot.topProjects
+                .map { "\($0.name) \(UsageFormat.compactTokens($0.tokens))" }
+                .joined(separator: sep)
+            lines.append(String(format: l10n["usage_insight_copy_projects"], joined))
+        }
+        if !snapshot.topTools.isEmpty {
+            let joined = snapshot.topTools
+                .map { "\($0.name) \(UsageFormat.percentWhole($0.share))" }
+                .joined(separator: sep)
+            lines.append(String(format: l10n["usage_insight_copy_tools"], joined))
+        }
+
+        return lines.joined(separator: "\n")
+    }
+}
+
 // MARK: - Sample provider
 
 /// Canned data matching the design mockup, used until the real aggregate
@@ -399,6 +495,37 @@ struct SampleUsageStatsProvider: UsageStatsProviding {
             ("", 300_000),
         ])
         snapshot.topTools = UsageRankingBuilder.toolRows(fromDetail: snapshot.detailRows)
+
+        snapshot.weeklyInsight = UsageWeeklyInsight(
+            weekTokens: 16_100_000,
+            weekCost: 30.60,
+            deltaVsLastWeek: 0.23,
+            dailyAverageTokens: 2_300_000,
+            peakDayLabel: weekdaySymbols.indices.contains(2) ? weekdaySymbols[2] : "二",
+            peakDayTokens: 4_700_000,
+            rangeLabel: "\(dayFormatter.string(from: calendar.date(byAdding: .day, value: -6, to: now) ?? now)) → \(dayFormatter.string(from: now))",
+            heatmap: Self.heatCells
+        )
         return snapshot
+    }
+
+    // Matches docs/design/token-usage-mockup.html's HEAT grid (values 0…4,
+    // Monday-first rows, 12 two-hour buckets); intensity is value / 4.
+    private static let heatValues: [[Int]] = [
+        [0,0,0,0,1,2,3,3,2,3,4,2],
+        [0,0,0,0,2,3,4,4,3,4,4,3],
+        [0,0,0,0,1,3,3,2,3,3,3,1],
+        [1,0,0,0,2,3,4,3,2,4,3,2],
+        [0,0,0,0,1,2,3,3,2,3,4,3],
+        [0,0,0,1,1,2,2,3,2,2,3,2],
+        [0,0,0,0,0,1,1,2,1,2,2,1],
+    ]
+
+    private static var heatCells: [UsageHeatmapCell] {
+        heatValues.enumerated().flatMap { weekday, row in
+            row.enumerated().map { hourBucket, value in
+                UsageHeatmapCell(weekday: weekday, hourBucket: hourBucket, tokens: value * 250_000, intensity: Double(value) / 4.0)
+            }
+        }
     }
 }

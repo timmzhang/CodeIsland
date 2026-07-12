@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import CodeIsland
 
 final class UsageStatsWindowTests: XCTestCase {
@@ -173,5 +174,46 @@ final class UsageStatsWindowTests: XCTestCase {
         XCTAssertFalse(snapshot.topProjects.isEmpty)
         XCTAssertFalse(snapshot.topTools.isEmpty)
         XCTAssertEqual(snapshot.topProjects.first?.name, "CodeIsland")
+    }
+
+    // MARK: Weekly insight (L3)
+
+    func testSampleSnapshotCarriesWeeklyInsight() {
+        let snapshot = SampleUsageStatsProvider.snapshot(now: Date())
+        let insight = snapshot.weeklyInsight
+        XCTAssertTrue(insight.hasData)
+        XCTAssertEqual(insight.weekTokens, 16_100_000)
+        XCTAssertEqual(insight.deltaVsLastWeek, 0.23)
+        XCTAssertEqual(insight.heatmap.count, 84, "7 weekdays × 12 two-hour buckets")
+        XCTAssertTrue(insight.heatmap.contains { $0.intensity == 1.0 }, "the busiest cell reaches full intensity")
+    }
+
+    func testEmptyWeeklyInsightHasNoData() {
+        XCTAssertFalse(UsageWeeklyInsight().hasData)
+    }
+
+    func testUsageRampInterpolatesBetweenEndpoints() {
+        XCTAssertEqual(Color.usageRamp(0x181D26, 0x86B6EF, 0), Color(usageHex: 0x181D26))
+        XCTAssertEqual(Color.usageRamp(0x181D26, 0x86B6EF, 1), Color(usageHex: 0x86B6EF))
+        // Clamps out-of-range intensities instead of extrapolating past the endpoints.
+        XCTAssertEqual(Color.usageRamp(0x181D26, 0x86B6EF, -1), Color(usageHex: 0x181D26))
+        XCTAssertEqual(Color.usageRamp(0x181D26, 0x86B6EF, 2), Color(usageHex: 0x86B6EF))
+    }
+
+    func testInsightTextIncludesWeekTotalDeltaAndRankings() {
+        let snapshot = SampleUsageStatsProvider.snapshot(now: Date())
+        let text = UsageInsightText.build(snapshot: snapshot, l10n: L10n.shared)
+        XCTAssertTrue(text.contains("16.1M"))
+        XCTAssertTrue(text.contains("23%"))
+        XCTAssertTrue(text.contains("CodeIsland"))
+        XCTAssertTrue(text.contains("Claude"))
+    }
+
+    func testInsightTextOmitsMissingSections() {
+        var snapshot = UsageStatsSnapshot()
+        snapshot.weeklyInsight = UsageWeeklyInsight(weekTokens: 500_000, weekCost: nil, dailyAverageTokens: 0)
+        let text = UsageInsightText.build(snapshot: snapshot, l10n: L10n.shared)
+        XCTAssertEqual(text.split(separator: "\n").count, 1, "no delta, no daily-avg, no rankings — just the week total")
+        XCTAssertTrue(text.contains("500K"))
     }
 }

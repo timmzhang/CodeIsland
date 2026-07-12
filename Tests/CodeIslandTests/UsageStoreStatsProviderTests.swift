@@ -193,4 +193,72 @@ final class UsageStoreStatsProviderTests: XCTestCase {
         XCTAssertEqual(snapshot.topTools.first?.name, "Claude")
         XCTAssertEqual(snapshot.topTools.map(\.name).count, 2)
     }
+
+    // MARK: Weekly insight (L3)
+
+    private func rawEvent(_ date: Date, input: Int64, output: Int64 = 0, key: String) -> UsageEvent {
+        UsageEvent(
+            tool: "claude-code", sessionId: "s", model: "claude-fable-5", project: "",
+            timestamp: date, inputTokens: input, outputTokens: output,
+            cacheReadTokens: 0, cacheWriteTokens: 0, dedupKey: key
+        )
+    }
+
+    private func at(_ day: Int, hour: Int) -> Date {
+        DateComponents(calendar: calendar, timeZone: tz, year: 2026, month: 7, day: day, hour: hour).date!
+    }
+
+    func testWeeklyInsightDailyAveragePeakAndHeatmap() throws {
+        // The gregorian default week for `now` runs Sun 07-12 … Sat 07-18.
+        // `now` here is Wed 07-15 18:00, so the week-to-date spans 4 days.
+        let wed = at(15, hour: 18)
+        let store = try makeStore()
+        try store.record([
+            rawEvent(at(12, hour: 9), input: 100, output: 100, key: "sun"),   // 200, Sunday
+            rawEvent(at(13, hour: 9), input: 100, output: 100, key: "mon"),   // 200, Monday
+            rawEvent(at(14, hour: 15), input: 300, output: 300, key: "tue"),  // 600, Tuesday 15:00 -> bucket 7
+        ])
+
+        let snapshot = try UsageStoreStatsProvider.snapshot(
+            store: store, now: wed, activeSessions: 0, calendar: calendar, timeZone: tz
+        )
+        let insight = snapshot.weeklyInsight
+
+        XCTAssertEqual(insight.weekTokens, 1000)
+        XCTAssertEqual(insight.dailyAverageTokens, 250, "1000 tokens / 4 elapsed days (Sun…Wed)")
+        XCTAssertEqual(insight.peakDayTokens, 600, "Tuesday is the busiest day so far")
+        XCTAssertFalse(insight.peakDayLabel.isEmpty)
+        XCTAssertNil(insight.deltaVsLastWeek, "no prior-week data recorded")
+
+        XCTAssertEqual(insight.heatmap.count, 84, "7 weekdays × 12 two-hour buckets")
+        // Monday-first row index: Sunday -> 6, Monday -> 0, Tuesday -> 1.
+        XCTAssertEqual(insight.heatmap.first { $0.weekday == 6 && $0.hourBucket == 4 }?.tokens, 200)
+        XCTAssertEqual(insight.heatmap.first { $0.weekday == 0 && $0.hourBucket == 4 }?.tokens, 200)
+        let tuesdayCell = insight.heatmap.first { $0.weekday == 1 && $0.hourBucket == 7 }
+        XCTAssertEqual(tuesdayCell?.tokens, 600)
+        XCTAssertEqual(tuesdayCell?.intensity, 1.0, "the busiest cell always has full intensity")
+        XCTAssertEqual(insight.heatmap.filter { $0.tokens == 0 }.count, 81, "84 cells - 3 populated")
+    }
+
+    func testWeeklyInsightDeltaVsSameElapsedPortionOfLastWeek() throws {
+        // `now` is Tue 07-14 12:00 — this week (Sun…Tue-noon) vs the same
+        // Sun…Tue-noon window last week, not last week's whole Tuesday.
+        let tue = at(14, hour: 12)
+        let store = try makeStore()
+        try store.record([
+            rawEvent(at(12, hour: 9), input: 100, key: "w-sun"),
+            rawEvent(at(13, hour: 9), input: 100, key: "w-mon"),
+            rawEvent(at(14, hour: 9), input: 100, key: "w-tue"),
+            rawEvent(at(5, hour: 9), input: 50, key: "lw-sun"),
+            rawEvent(at(6, hour: 9), input: 50, key: "lw-mon"),
+            // After last week's comparable cutoff (Tue 12:00) — must not count.
+            rawEvent(at(7, hour: 18), input: 999, key: "lw-late-tue"),
+        ])
+
+        let snapshot = try UsageStoreStatsProvider.snapshot(
+            store: store, now: tue, activeSessions: 0, calendar: calendar, timeZone: tz
+        )
+        // (300 - 100) / 100
+        XCTAssertEqual(snapshot.weeklyInsight.deltaVsLastWeek!, 2.0, accuracy: 1e-9)
+    }
 }

@@ -1,9 +1,12 @@
+import AppKit
 import SwiftUI
 import Charts
 
-/// L2 stats window content: 4 summary tiles, day/week stacked bar chart,
-/// tool × model detail table. Visuals follow docs/design/token-usage-mockup.html;
-/// the window is dark-only (the palette is validated against #111318).
+/// Stats window content: L2 "报表" tab (4 summary tiles, day/week stacked bar
+/// chart, tool × model detail table) and L3 "周报洞察" tab (hero card, Top
+/// project/tool rankings, 7×12 activity heatmap, copy-as-text). Visuals follow
+/// docs/design/token-usage-mockup.html; the window is dark-only (the palette
+/// is validated against #111318).
 struct UsageStatsView: View {
     let provider: UsageStatsProviding
 
@@ -11,8 +14,14 @@ struct UsageStatsView: View {
         case day, week
     }
 
+    enum Tab {
+        case report, insight
+    }
+
     @State private var snapshot: UsageStatsSnapshot?
     @State private var granularity: Granularity
+    @State private var tab: Tab = .report
+    @State private var copied = false
     @ObservedObject private var l10n = L10n.shared
 
     /// `initialSnapshot`/`initialGranularity` bypass async loading — for
@@ -68,32 +77,35 @@ struct UsageStatsView: View {
 
     private func content(_ snapshot: UsageStatsSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 18) {
-            headerRow
-            tiles(snapshot.summary)
-            UsageChartCard(
-                buckets: buckets,
-                title: l10n[granularity == .day ? "usage_chart_daily" : "usage_chart_weekly"],
-                totalLabel: l10n[granularity == .day ? "usage_total_day" : "usage_total_week"]
-            )
-            detailTable(snapshot)
-            if !snapshot.topProjects.isEmpty || !snapshot.topTools.isEmpty {
-                rankingCards(snapshot)
+            topBar
+            switch tab {
+            case .report:
+                reportHeaderRow
+                tiles(snapshot.summary)
+                UsageChartCard(
+                    buckets: buckets,
+                    title: l10n[granularity == .day ? "usage_chart_daily" : "usage_chart_weekly"],
+                    totalLabel: l10n[granularity == .day ? "usage_total_day" : "usage_total_week"]
+                )
+                detailTable(snapshot)
+                Text(l10n["usage_footnote"])
+                    .font(.system(size: 10))
+                    .foregroundStyle(ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .insight:
+                insightContent(snapshot)
             }
-            Text(l10n["usage_footnote"])
-                .font(.system(size: 10))
-                .foregroundStyle(ink3)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .font(.system(size: 12, design: .monospaced))
     }
 
-    // MARK: Header (segmented control + range label)
+    // MARK: Top bar (report/insight tab switch + sample badge)
 
-    private var headerRow: some View {
+    private var topBar: some View {
         HStack {
             HStack(spacing: 2) {
-                segButton(l10n["usage_seg_day"], .day)
-                segButton(l10n["usage_seg_week"], .week)
+                tabButton(l10n["usage_tab_report"], .report)
+                tabButton(l10n["usage_tab_insight"], .insight)
             }
             .padding(2)
             .background(cardBG, in: RoundedRectangle(cornerRadius: 7))
@@ -109,6 +121,39 @@ struct UsageStatsView: View {
                     .padding(.vertical, 2)
                     .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color(usageHex: 0xC98500).opacity(0.5), lineWidth: 1))
             }
+        }
+    }
+
+    private func tabButton(_ title: String, _ value: Tab) -> some View {
+        let selected = tab == value
+        return Button {
+            tab = value
+        } label: {
+            Text(title)
+                .font(.system(size: 11, design: .monospaced))
+                .fontWeight(selected ? .bold : .regular)
+                .foregroundStyle(selected ? ink : ink2)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 4)
+                .background(selected ? segSelectedBG : .clear, in: RoundedRectangle(cornerRadius: 5))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: Report tab header (day/week segmented control + range label)
+
+    private var reportHeaderRow: some View {
+        HStack {
+            HStack(spacing: 2) {
+                segButton(l10n["usage_seg_day"], .day)
+                segButton(l10n["usage_seg_week"], .week)
+            }
+            .padding(2)
+            .background(cardBG, in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(cardBorder, lineWidth: 1))
+
+            Spacer()
 
             Text(rangeLabel)
                 .font(.system(size: 11, design: .monospaced))
@@ -329,6 +374,144 @@ struct UsageStatsView: View {
         .gridColumnAlignment(.trailing)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    // MARK: Insight tab (L3)
+
+    private func insightContent(_ snapshot: UsageStatsSnapshot) -> some View {
+        let insight = snapshot.weeklyInsight
+        return VStack(alignment: .leading, spacing: 14) {
+            if insight.hasData {
+                heroCard(insight)
+                if !snapshot.topProjects.isEmpty || !snapshot.topTools.isEmpty {
+                    rankingCards(snapshot)
+                }
+                if !insight.heatmap.isEmpty {
+                    heatmapCard(insight)
+                }
+                copyRow(snapshot)
+            } else {
+                Text(l10n["usage_insight_empty"])
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(ink3)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 40)
+            }
+        }
+    }
+
+    private func heroCard(_ insight: UsageWeeklyInsight) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(l10n["usage_insight_hero_title"])
+                    .font(.system(size: 10, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(ink3)
+                HStack(alignment: .lastTextBaseline, spacing: 5) {
+                    Text(UsageFormat.compactTokens(insight.weekTokens))
+                        .font(.system(size: 28, weight: .bold, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(ink)
+                    Text("tokens")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(ink2)
+                }
+                if let cost = insight.weekCost {
+                    Text(String(format: l10n["usage_insight_hero_sub"], UsageFormat.equivalentCost(cost)))
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(ink3)
+                }
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 4) {
+                if let delta = insight.deltaVsLastWeek {
+                    let up = delta >= 0
+                    (Text("\(up ? "▲" : "▼") \(Int((abs(delta) * 100).rounded()))% ")
+                        .foregroundStyle(up ? good : Color(usageHex: 0xD64545))
+                    + Text(l10n["usage_insight_vs_last_week"])
+                        .foregroundStyle(ink3))
+                        .font(.system(size: 11.5, design: .monospaced))
+                }
+                if insight.dailyAverageTokens > 0 {
+                    Text(String(
+                        format: l10n["usage_insight_daily_avg_peak"],
+                        UsageFormat.compactTokens(insight.dailyAverageTokens),
+                        insight.peakDayLabel,
+                        UsageFormat.compactTokens(insight.peakDayTokens)
+                    ))
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(ink3)
+                }
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .background(
+            LinearGradient(
+                colors: [Color(usageHex: 0x1A1F28), Color(usageHex: 0x171B22)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 9)
+        )
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(cardBorder, lineWidth: 1))
+    }
+
+    private func heatmapCard(_ insight: UsageWeeklyInsight) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(l10n["usage_insight_heatmap_title"])
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(ink)
+            UsageHeatmapGrid(cells: insight.heatmap, weekdayLabels: heatmapWeekdayLabels)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(cardBG, in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(cardBorder, lineWidth: 1))
+    }
+
+    /// Monday-first short weekday labels in the app's chosen language
+    /// (independent of the device locale, unlike the daily-chart axis labels).
+    private var heatmapWeekdayLabels: [String] {
+        let localeID: String
+        switch l10n.effectiveLanguage {
+        case "zh": localeID = "zh_CN"
+        case "ja": localeID = "ja_JP"
+        case "ko": localeID = "ko_KR"
+        case "tr": localeID = "tr_TR"
+        default: localeID = "en_US"
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: localeID)
+        let symbols = calendar.veryShortStandaloneWeekdaySymbols
+        guard symbols.count == 7 else { return Array(repeating: "", count: 7) }
+        return (0..<7).map { symbols[($0 + 1) % 7] }
+    }
+
+    private func copyRow(_ snapshot: UsageStatsSnapshot) -> some View {
+        HStack {
+            Spacer()
+            Button {
+                copyInsightText(snapshot)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    Text(copied ? l10n["usage_insight_copied"] : l10n["usage_insight_copy"])
+                }
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(copied ? good : ink2)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(cardBorder, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func copyInsightText(_ snapshot: UsageStatsSnapshot) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(UsageInsightText.build(snapshot: snapshot, l10n: l10n), forType: .string)
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { copied = false }
     }
 
     // MARK: Top rankings
@@ -564,5 +747,52 @@ private struct UsageChartCard: View {
         .shadow(color: .black.opacity(0.5), radius: 10, y: 4)
         .position(x: x + width / 2, y: y)
         .allowsHitTesting(false)
+    }
+}
+
+// MARK: - Activity heatmap (7 days × 12 two-hour buckets)
+
+private struct UsageHeatmapGrid: View {
+    let cells: [UsageHeatmapCell]
+    let weekdayLabels: [String]
+
+    private let ink3 = Color(usageHex: 0x6B7280)
+    private let rampLow: UInt32 = 0x181D26
+    private let rampHigh: UInt32 = 0x86B6EF
+
+    private var rows: [[UsageHeatmapCell]] {
+        var byWeekday = Array(repeating: [UsageHeatmapCell](), count: 7)
+        for cell in cells where (0..<7).contains(cell.weekday) {
+            byWeekday[cell.weekday].append(cell)
+        }
+        return byWeekday.map { $0.sorted { $0.hourBucket < $1.hourBucket } }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                HStack(spacing: 3) {
+                    Text(weekdayLabels.indices.contains(index) ? weekdayLabels[index] : "")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(ink3)
+                        .frame(width: 22, alignment: .leading)
+                    ForEach(row) { cell in
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color.usageRamp(rampLow, rampHigh, cell.intensity))
+                            .aspectRatio(1.4, contentMode: .fit)
+                            .help("\(weekdayLabels.indices.contains(index) ? weekdayLabels[index] : "") \(cell.hourBucket * 2):00–\(cell.hourBucket * 2 + 2):00 · \(UsageFormat.compactTokens(cell.tokens))")
+                    }
+                }
+            }
+            HStack(spacing: 3) {
+                Color.clear.frame(width: 22)
+                ForEach(Array(stride(from: 0, to: 24, by: 2)), id: \.self) { hour in
+                    Text("\(hour)")
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(ink3)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+        }
     }
 }
