@@ -2,55 +2,6 @@ import SwiftUI
 
 // MARK: - L1 usage surfaces (design: docs/design/token-usage.md, mockup: token-usage-mockup.html)
 
-/// Collapsed compact-bar badge: 7-day mini bars + today's tokens + equivalent cost.
-/// Rendered to the right of the session status; ~90pt wide; hidden until data exists.
-@MainActor
-struct UsageBadgeView: View {
-    var model = UsageStatsModel.shared
-
-    private var snapshot: UsageTodaySnapshot { model.today }
-
-    var body: some View {
-        HStack(spacing: 6) {
-            UsageSparkBars(values: snapshot.last7DayTokens)
-
-            Text(UsageFormat.compactTokens(snapshot.totalTokens))
-                .font(.system(size: 12.5, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.92))
-
-            if let cost = snapshot.equivalentCostUSD {
-                Text(UsageFormat.equivalentCost(cost))
-                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.55))
-            }
-        }
-        .lineLimit(1)
-        .fixedSize()
-    }
-}
-
-/// Last-7-days mini bar chart (3pt bars, 2pt gaps, today highlighted).
-private struct UsageSparkBars: View {
-    /// Oldest first; last element is today
-    let values: [Int]
-
-    private static let todayColor = Color(red: 0.851, green: 0.349, blue: 0.149)  // #d95926
-    private static let pastColor = Color(red: 0.247, green: 0.278, blue: 0.337)   // #3f4756
-
-    var body: some View {
-        let maxValue = max(values.max() ?? 0, 1)
-        HStack(alignment: .bottom, spacing: 2) {
-            ForEach(Array(values.enumerated()), id: \.offset) { index, value in
-                let isToday = index == values.count - 1
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(isToday ? Self.todayColor : Self.pastColor)
-                    .frame(width: 3, height: max(2, 14 * CGFloat(value) / CGFloat(maxValue)))
-            }
-        }
-        .frame(height: 14, alignment: .bottom)
-    }
-}
-
 /// Shared hover state for the toolbar entry ↔ detail popover pair. The
 /// popover appears after a short delay and must survive the mouse hop from
 /// entry to popover body (design: p-cfj6 — the popover is the only affordance

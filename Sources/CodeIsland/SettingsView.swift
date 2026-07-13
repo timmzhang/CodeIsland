@@ -785,7 +785,6 @@ private struct AppearancePage: View {
     @AppStorage(SettingsKey.aiMessageLines) private var aiMessageLines = SettingsDefaults.aiMessageLines
     @AppStorage(SettingsKey.showAgentDetails) private var showAgentDetails = SettingsDefaults.showAgentDetails
     @AppStorage(SettingsKey.showToolStatus) private var showToolStatus = SettingsDefaults.showToolStatus
-    @AppStorage(SettingsKey.showUsageBadge) private var showUsageBadge = SettingsDefaults.showUsageBadge
     @AppStorage(SettingsKey.collapsedWidthScale) private var collapsedWidthScale = SettingsDefaults.collapsedWidthScale
     @AppStorage(SettingsKey.notchHeightMode) private var notchHeightModeRaw = SettingsDefaults.notchHeightMode
     @AppStorage(SettingsKey.customNotchHeight) private var customNotchHeight = SettingsDefaults.customNotchHeight
@@ -873,10 +872,6 @@ private struct AppearancePage: View {
                 }
                 Toggle(l10n["show_agent_details"], isOn: $showAgentDetails)
                 Toggle(l10n["show_tool_status"], isOn: $showToolStatus)
-                Toggle(isOn: $showUsageBadge) {
-                    Text(l10n["show_usage_badge"])
-                    Text(l10n["show_usage_badge_desc"])
-                }
                 UsagePricingOverrideEditor()
             }
         }

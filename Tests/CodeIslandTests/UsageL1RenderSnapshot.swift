@@ -26,7 +26,6 @@ final class UsageL1RenderSnapshot: XCTestCase {
         ]
         UsageStatsModel.shared.update(snapshot)
 
-        try render(UsageBadgeView().padding(8), to: "\(dir)/badge.png")
         try render(UsageToolbarEntry(popover: UsagePopoverState(), onOpenDetail: {}).padding(8), to: "\(dir)/entry.png")
         try render(UsageTodaySection().frame(width: 380), to: "\(dir)/section.png")
         try render(UsageHoverPopover(popover: UsagePopoverState(), onOpenDetail: {}).padding(8), to: "\(dir)/popover.png")

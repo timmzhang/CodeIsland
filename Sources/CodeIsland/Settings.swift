@@ -80,9 +80,6 @@ enum SettingsKey {
     // Tool status display
     static let showToolStatus = "showToolStatus"              // true = detailed, false = simple
 
-    // Today-usage badge in the compact bar (L1, docs/design/token-usage.md)
-    static let showUsageBadge = "showUsageBadge"
-
     // Equivalent-cost price overrides: JSON {"<model keyword>": {"input":…, "output":…}}
     // in $/MTok, layered over UsagePriceTable's built-in rules
     static let usagePricingOverrides = "usagePricingOverrides"
@@ -155,8 +152,6 @@ struct SettingsDefaults {
 
     static let showToolStatus = true
 
-    static let showUsageBadge = true
-
     static let usagePricingOverrides = ""
 
     static let collapsedWidthScale = 100  // percentage
@@ -224,7 +219,6 @@ class SettingsManager {
             SettingsKey.mascotSpeed: SettingsDefaults.mascotSpeed,
             SettingsKey.sessionGroupingMode: SettingsDefaults.sessionGroupingMode,
             SettingsKey.showToolStatus: SettingsDefaults.showToolStatus,
-            SettingsKey.showUsageBadge: SettingsDefaults.showUsageBadge,
             SettingsKey.usagePricingOverrides: SettingsDefaults.usagePricingOverrides,
             SettingsKey.collapsedWidthScale: SettingsDefaults.collapsedWidthScale,
             SettingsKey.esp32BridgeEnabled: SettingsDefaults.esp32BridgeEnabled,

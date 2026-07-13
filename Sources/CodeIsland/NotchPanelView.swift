@@ -57,7 +57,6 @@ struct NotchPanelView: View {
     @AppStorage(SettingsKey.collapsedWidthScale) private var collapsedWidthScale = SettingsDefaults.collapsedWidthScale
     @AppStorage(SettingsKey.hapticOnHover) private var hapticOnHover = SettingsDefaults.hapticOnHover
     @AppStorage(SettingsKey.hapticIntensity) private var hapticIntensity = SettingsDefaults.hapticIntensity
-    @AppStorage(SettingsKey.showUsageBadge) private var showUsageBadge = SettingsDefaults.showUsageBadge
 
     /// Delayed hover: prevents accidental expansion when mouse passes through
     @State private var hoverTimer: Timer?
@@ -109,9 +108,7 @@ struct NotchPanelView: View {
         let extra: CGFloat = appState.status == .idle ? 0 : 20
         // Reserve space for tool status — proportional to screen width
         let toolExtra: CGFloat = displayedToolStatus ? (hasNotch ? screenWidth * 0.03 : screenWidth * 0.04) : 0
-        // Reserve space for the today-usage badge (~90pt per design)
-        let usageExtra: CGFloat = (showUsageBadge && UsageStatsModel.shared.today.hasData) ? 96 : 0
-        return nw + wing * 2 + extra + toolExtra + usageExtra
+        return nw + wing * 2 + extra + toolExtra
     }
 
     var body: some View {
@@ -484,7 +481,6 @@ private struct CompactRightWing: View {
     @ObservedObject private var l10n = L10n.shared
     @AppStorage(SettingsKey.soundEnabled) private var soundEnabled = SettingsDefaults.soundEnabled
     @AppStorage(SettingsKey.showToolStatus) private var showToolStatus = SettingsDefaults.showToolStatus
-    @AppStorage(SettingsKey.showUsageBadge) private var showUsageBadge = SettingsDefaults.showUsageBadge
 
     private var displaySessionId: String? {
         appState.rotatingSessionId ?? appState.activeSessionId ?? appState.sessions.keys.sorted().first
@@ -552,15 +548,6 @@ private struct CompactRightWing: View {
                             .foregroundStyle(.white.opacity(0.9))
                     }
                     .font(.system(size: 13, weight: .bold, design: .monospaced))
-                }
-
-                // Today-usage badge — right of the session status per design
-                if showUsageBadge && showsUsage {
-                    Rectangle()
-                        .fill(.white.opacity(0.15))
-                        .frame(width: 1, height: 14)
-                        .padding(.horizontal, 3)
-                    UsageBadgeView()
                 }
             }
         }
