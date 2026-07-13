@@ -89,7 +89,7 @@ final class UsageWiringVerification: XCTestCase {
 
         // Render the real views from this data.
         try render(UsageBadgeView().padding(8), to: "\(dir)/l1-badge-real.png")
-        try render(UsageToolbarEntry().padding(8), to: "\(dir)/l1-entry-real.png")
+        try render(UsageToolbarEntry(popover: UsagePopoverState(), onOpenDetail: {}).padding(8), to: "\(dir)/l1-entry-real.png")
         try render(UsageTodaySection().frame(width: 380), to: "\(dir)/l1-section-real.png")
         // ImageRenderer skips ScrollView content; capture through NSHostingView.
         let hosting = NSHostingView(

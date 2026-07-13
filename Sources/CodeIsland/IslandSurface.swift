@@ -10,13 +10,15 @@ enum IslandSurface: Equatable {
     case questionCard(sessionId: String)
     /// 自动展开显示完成通知
     case completionCard(sessionId: String)
+    /// Token 用量详情页（从工具栏入口/hover 弹层进入）
+    case usageDetail
 
     var isExpanded: Bool { self != .collapsed }
 
     /// 当前 surface 关联的 session ID（如有）
     var sessionId: String? {
         switch self {
-        case .collapsed, .sessionList: return nil
+        case .collapsed, .sessionList, .usageDetail: return nil
         case .approvalCard(let id), .questionCard(let id), .completionCard(let id): return id
         }
     }

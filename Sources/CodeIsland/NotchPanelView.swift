@@ -67,6 +67,8 @@ struct NotchPanelView: View {
     @State private var curtainOffset: CGFloat = 0
     @State private var curtainOpacity: Double = 1
     @State private var displayedToolStatus: Bool = SettingsDefaults.showToolStatus
+    /// Hover state shared by the usage toolbar entry and its detail popover
+    @State private var usagePopover = UsagePopoverState()
 
     private var isActive: Bool { !appState.sessions.isEmpty }
     /// First launch / no-session state should still render a visible marker so the app
@@ -127,7 +129,7 @@ struct NotchPanelView: View {
                         } else {
                             Spacer(minLength: 0)
                         }
-                        CompactRightWing(appState: appState, expanded: shouldShowExpanded, hasNotch: hasNotch)
+                        CompactRightWing(appState: appState, expanded: shouldShowExpanded, hasNotch: hasNotch, usagePopover: usagePopover)
                     }
                     .frame(height: notchHeight)
                 } else if showIdleIndicator {
@@ -210,6 +212,9 @@ struct NotchPanelView: View {
                             .transition(.blurFade.combined(with: .move(edge: .top)))
                     case .sessionList:
                         SessionListView(appState: appState, onlySessionId: nil)
+                            .transition(.blurFade.combined(with: .move(edge: .top)))
+                    case .usageDetail:
+                        UsageDetailView(appState: appState)
                             .transition(.blurFade.combined(with: .move(edge: .top)))
                     case .collapsed:
                         EmptyView()
@@ -333,11 +338,29 @@ struct NotchPanelView: View {
                     hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { _ in
                         Task { @MainActor in
                             guard !isHovered else { return }
+                            // The usage popover can extend below a short panel —
+                            // hovering it must not count as leaving the panel.
+                            guard !usagePopover.popoverHovered else { return }
                             withAnimation(NotchAnimation.close) {
                                 appState.surface = .collapsed
                             }
                         }
                     }
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if shouldShowExpanded, usagePopover.visible, appState.surface != .usageDetail {
+                    UsageHoverPopover(popover: usagePopover) {
+                        withAnimation(NotchAnimation.open) { appState.surface = .usageDetail }
+                    }
+                    .padding(.top, notchHeight + 6)
+                    .padding(.trailing, 10)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
+                }
+            }
+            .onChange(of: appState.surface) { _, newSurface in
+                if newSurface == .collapsed || newSurface == .usageDetail {
+                    usagePopover.dismiss()
                 }
             }
 
@@ -457,6 +480,7 @@ private struct CompactRightWing: View {
     var appState: AppState
     let expanded: Bool
     let hasNotch: Bool
+    var usagePopover: UsagePopoverState
     @ObservedObject private var l10n = L10n.shared
     @AppStorage(SettingsKey.soundEnabled) private var soundEnabled = SettingsDefaults.soundEnabled
     @AppStorage(SettingsKey.showToolStatus) private var showToolStatus = SettingsDefaults.showToolStatus
@@ -475,8 +499,10 @@ private struct CompactRightWing: View {
         HStack(spacing: 6) {
             if expanded {
                 if showsUsage {
-                    UsageToolbarEntry()
-                        .padding(.trailing, 4)
+                    UsageToolbarEntry(popover: usagePopover) {
+                        withAnimation(NotchAnimation.open) { appState.surface = .usageDetail }
+                    }
+                    .padding(.trailing, 4)
                 }
                 NotchIconButton(icon: soundEnabled ? "speaker.wave.2" : "speaker.slash", tooltip: soundEnabled ? l10n["mute"] : l10n["enable_sound_tooltip"]) {
                     soundEnabled.toggle()
