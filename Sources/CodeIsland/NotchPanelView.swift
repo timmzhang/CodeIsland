@@ -1756,15 +1756,6 @@ private struct SessionListView: View {
                 }
             }
 
-            // Today-usage section — per-tool subtotals + cache hit rate (L1)
-            if onlySessionId == nil && UsageStatsModel.shared.today.hasData {
-                Line()
-                    .stroke(.white.opacity(0.15), style: StrokeStyle(lineWidth: 0.5, dash: [4, 3]))
-                    .frame(height: 0.5)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 4)
-                UsageTodaySection()
-            }
         }
         .padding(.vertical, 4)
 
