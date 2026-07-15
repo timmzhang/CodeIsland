@@ -17,6 +17,7 @@ enum UpdateState: Equatable {
 @MainActor
 final class UpdateChecker: NSObject, ObservableObject {
     static let shared = UpdateChecker()
+    static let automaticUpdateChecksEnabled = false
     private static let log = Logger(subsystem: "com.codeisland", category: "UpdateChecker")
 
     @Published private(set) var state: UpdateState = .idle
@@ -31,8 +32,8 @@ final class UpdateChecker: NSObject, ObservableObject {
     /// `checkForUpdates()` and `state` for most UI.
     var updater: SPUUpdater { controller.updater }
 
-    /// True when the app bundle lives inside a Homebrew cask path. Homebrew
-    /// manages its own upgrade flow, so Sparkle stays hands-off in that case.
+    /// True when the app bundle lives inside a Homebrew cask path. The About
+    /// page uses this to show the appropriate manual update instructions.
     var isHomebrewInstall: Bool {
         let path = Bundle.main.bundlePath
         return path.contains("/Caskroom/") || path.contains("/homebrew/")
@@ -50,12 +51,10 @@ final class UpdateChecker: NSObject, ObservableObject {
         }
         #endif
 
-        if isHomebrewInstall {
-            Self.log.info("Homebrew install detected — disabling Sparkle auto-checks")
-            updater.automaticallyChecksForUpdates = false
-        } else {
-            updater.automaticallyChecksForUpdates = true
-        }
+        // Updates are user-initiated from the About page. Keep scheduled
+        // checks disabled so launching CodeIsland never presents Sparkle's
+        // unsolicited "new version available" alert.
+        updater.automaticallyChecksForUpdates = Self.automaticUpdateChecksEnabled
         controller.startUpdater()
     }
 

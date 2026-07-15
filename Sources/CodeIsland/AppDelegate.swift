@@ -107,9 +107,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         #endif
 
-        // Sparkle runs scheduled checks itself on the cadence declared in
-        // Info.plist (SUScheduledCheckInterval). Start the updater once — it
-        // no-ops for Homebrew-installed builds (brew owns those upgrades).
+        // Initialize Sparkle for user-initiated checks from the About page.
+        // Scheduled checks remain disabled, so launch never shows an update
+        // prompt on its own.
         UpdateChecker.shared.start()
 
         // Usage stats: open the SQLite store, rescan transcripts (dedup keys
