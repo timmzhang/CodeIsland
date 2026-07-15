@@ -20,33 +20,41 @@ public struct ConversationTailDelta: Equatable, Sendable {
     /// Token usage rows observed in the appended lines, in file order. Not yet
     /// deduplicated — consumers run them through a `ClaudeUsageDeduplicator`.
     public let usageEvents: [ClaudeUsageEvent]
+    /// Codex `event_msg.token_count` rows observed in rollout transcripts.
+    /// These share the provider's deduplicator with app-server notifications
+    /// before they reach the usage store.
+    public let codexUsageEvents: [CodexUsageEvent]
 
     public init(
         sessionId: String,
         lastUserPrompt: String?,
         lastAssistantMessage: String?,
         permissionDecisions: [TranscriptPermissionDecision] = [],
-        usageEvents: [ClaudeUsageEvent] = []
+        usageEvents: [ClaudeUsageEvent] = [],
+        codexUsageEvents: [CodexUsageEvent] = []
     ) {
         self.sessionId = sessionId
         self.lastUserPrompt = lastUserPrompt
         self.lastAssistantMessage = lastAssistantMessage
         self.permissionDecisions = permissionDecisions
         self.usageEvents = usageEvents
+        self.codexUsageEvents = codexUsageEvents
     }
 
     /// A delta only carries signal when at least one field is non-nil.
     public var isEmpty: Bool {
         lastUserPrompt == nil && lastAssistantMessage == nil
             && permissionDecisions.isEmpty && usageEvents.isEmpty
+            && codexUsageEvents.isEmpty
     }
 }
 
-/// Watches one or more Claude-style JSONL transcripts and streams incremental
+/// Watches one or more agent JSONL transcripts and streams incremental
 /// `ConversationTailDelta` events as new lines are appended.
 ///
-/// The tailer attaches at end-of-file so it complements — rather than duplicates —
-/// whatever initial backfill the caller already performed via filesystem scanning.
+/// By default the tailer attaches at end-of-file so it complements — rather than
+/// duplicates — initial backfill. Callers can request one replay for a newly
+/// discovered Codex rollout; provider/store dedup makes overlap harmless.
 /// When the file's inode changes (e.g. user ran `/clear` or a new session rotated
 /// on top of the same path) the watch transparently re-opens from the new file.
 ///
@@ -63,15 +71,28 @@ public final class JSONLTailer: @unchecked Sendable {
         var offset: off_t
         var inode: ino_t
         var pendingFragment: Data
+        let usageSessionId: String
+        var codexModel: String?
         var source: DispatchSourceFileSystemObject
 
-        init(sessionId: String, filePath: String, fd: Int32, offset: off_t, inode: ino_t, source: DispatchSourceFileSystemObject) {
+        init(
+            sessionId: String,
+            filePath: String,
+            fd: Int32,
+            offset: off_t,
+            inode: ino_t,
+            usageSessionId: String,
+            codexModel: String?,
+            source: DispatchSourceFileSystemObject
+        ) {
             self.sessionId = sessionId
             self.filePath = filePath
             self.fd = fd
             self.offset = offset
             self.inode = inode
             self.pendingFragment = Data()
+            self.usageSessionId = usageSessionId
+            self.codexModel = codexModel
             self.source = source
         }
     }
@@ -96,10 +117,32 @@ public final class JSONLTailer: @unchecked Sendable {
 
     // MARK: - Public API
 
-    public func attach(sessionId: String, filePath: String) {
+    public func attach(
+        sessionId: String,
+        filePath: String,
+        replayExisting: Bool = false,
+        usageSessionId: String? = nil,
+        codexModel: String? = nil
+    ) {
         queue.async { [weak self] in
             self?.detachOnQueue(sessionId: sessionId)
-            self?.attachOnQueue(sessionId: sessionId, filePath: filePath, initialOffset: nil)
+            self?.attachOnQueue(
+                sessionId: sessionId,
+                filePath: filePath,
+                initialOffset: replayExisting ? 0 : nil,
+                usageSessionId: usageSessionId ?? sessionId,
+                codexModel: codexModel
+            )
+        }
+    }
+
+    /// Immediately read bytes appended since the last delivered delta. Hooks
+    /// call this at turn/session boundaries to avoid waiting for a coalesced
+    /// filesystem notification; the normal file watch remains the primary path.
+    public func flush(sessionId: String) {
+        queue.async { [weak self] in
+            guard let self, let watch = self.watches[sessionId] else { return }
+            self.drainWatch(watch)
         }
     }
 
@@ -124,7 +167,13 @@ public final class JSONLTailer: @unchecked Sendable {
 
     // MARK: - Watch lifecycle
 
-    private func attachOnQueue(sessionId: String, filePath: String, initialOffset: off_t?) {
+    private func attachOnQueue(
+        sessionId: String,
+        filePath: String,
+        initialOffset: off_t?,
+        usageSessionId: String,
+        codexModel: String?
+    ) {
         let fd = open(filePath, O_RDONLY | O_NONBLOCK)
         guard fd >= 0 else { return }
         var fileStat = stat()
@@ -145,6 +194,8 @@ public final class JSONLTailer: @unchecked Sendable {
             fd: fd,
             offset: offset,
             inode: fileStat.st_ino,
+            usageSessionId: usageSessionId,
+            codexModel: codexModel,
             source: source
         )
 
@@ -159,6 +210,9 @@ public final class JSONLTailer: @unchecked Sendable {
 
         watches[sessionId] = watch
         source.resume()
+        if initialOffset == 0 {
+            drainWatch(watch)
+        }
     }
 
     private func detachOnQueue(sessionId: String) {
@@ -177,11 +231,21 @@ public final class JSONLTailer: @unchecked Sendable {
             detachOnQueue(sessionId: sid)
             // Give the writer a moment to finish writing the new file before we reopen.
             queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
-                self?.attachOnQueue(sessionId: sid, filePath: path, initialOffset: 0)
+                self?.attachOnQueue(
+                    sessionId: sid,
+                    filePath: path,
+                    initialOffset: 0,
+                    usageSessionId: watch.usageSessionId,
+                    codexModel: watch.codexModel
+                )
             }
             return
         }
 
+        drainWatch(watch)
+    }
+
+    private func drainWatch(_ watch: Watch) {
         var fileStat = stat()
         if stat(watch.filePath, &fileStat) == 0 {
             if fileStat.st_ino != watch.inode {
@@ -189,7 +253,13 @@ public final class JSONLTailer: @unchecked Sendable {
                 let path = watch.filePath
                 let sid = watch.sessionId
                 detachOnQueue(sessionId: sid)
-                attachOnQueue(sessionId: sid, filePath: path, initialOffset: 0)
+                attachOnQueue(
+                    sessionId: sid,
+                    filePath: path,
+                    initialOffset: 0,
+                    usageSessionId: watch.usageSessionId,
+                    codexModel: watch.codexModel
+                )
                 return
             }
             if fileStat.st_size < watch.offset {
@@ -202,8 +272,13 @@ public final class JSONLTailer: @unchecked Sendable {
         guard let appended = readFromOffset(watch: watch) else { return }
         let combined = watch.pendingFragment + appended
 
-        let scan = JSONLTailer.scanLines(combined)
+        let scan = JSONLTailer.scanLines(
+            combined,
+            codexSessionId: watch.usageSessionId,
+            codexModel: watch.codexModel
+        )
         watch.pendingFragment = scan.trailingFragment
+        watch.codexModel = scan.codexModel
         watch.offset += off_t(combined.count - scan.trailingFragment.count)
 
         if !scan.delta.isEmpty {
@@ -212,7 +287,8 @@ public final class JSONLTailer: @unchecked Sendable {
                 lastUserPrompt: scan.delta.lastUserPrompt,
                 lastAssistantMessage: scan.delta.lastAssistantMessage,
                 permissionDecisions: scan.delta.permissionDecisions,
-                usageEvents: scan.delta.usageEvents
+                usageEvents: scan.delta.usageEvents,
+                codexUsageEvents: scan.delta.codexUsageEvents
             )
             onDelta(delta)
         }
@@ -247,22 +323,30 @@ public final class JSONLTailer: @unchecked Sendable {
             public var lastAssistantMessage: String?
             public var permissionDecisions: [TranscriptPermissionDecision] = []
             public var usageEvents: [ClaudeUsageEvent] = []
+            public var codexUsageEvents: [CodexUsageEvent] = []
             public var isEmpty: Bool {
                 lastUserPrompt == nil
                     && lastAssistantMessage == nil
                     && permissionDecisions.isEmpty
                     && usageEvents.isEmpty
+                    && codexUsageEvents.isEmpty
             }
         }
         public let delta: Delta
         public let trailingFragment: Data
+        public let codexModel: String?
     }
 
     /// Split the given byte blob on newline boundaries and surface the latest user /
     /// assistant text observed. Bytes after the final newline are returned as a
     /// fragment that the caller should prepend on the next call.
-    public static func scanLines(_ data: Data) -> ScanResult {
+    public static func scanLines(
+        _ data: Data,
+        codexSessionId: String = "unknown",
+        codexModel: String? = nil
+    ) -> ScanResult {
         var delta = ScanResult.Delta()
+        var currentCodexModel = codexModel
         var lineStart = data.startIndex
         var cursor = data.startIndex
         let newline: UInt8 = 0x0A
@@ -271,7 +355,12 @@ public final class JSONLTailer: @unchecked Sendable {
             if data[cursor] == newline {
                 let line = data[lineStart..<cursor]
                 if !line.isEmpty {
-                    apply(line: line, into: &delta)
+                    apply(
+                        line: line,
+                        into: &delta,
+                        codexSessionId: codexSessionId,
+                        codexModel: &currentCodexModel
+                    )
                 }
                 lineStart = data.index(after: cursor)
             }
@@ -279,15 +368,48 @@ public final class JSONLTailer: @unchecked Sendable {
         }
 
         let fragment = Data(data[lineStart..<data.endIndex])
-        return ScanResult(delta: delta, trailingFragment: fragment)
+        return ScanResult(
+            delta: delta,
+            trailingFragment: fragment,
+            codexModel: currentCodexModel
+        )
     }
 
-    private static func apply(line: Data.SubSequence, into delta: inout ScanResult.Delta) {
+    private static func apply(
+        line: Data.SubSequence,
+        into delta: inout ScanResult.Delta,
+        codexSessionId: String,
+        codexModel: inout String?
+    ) {
         // Materialize the slice once so the byte probe and the JSON parser share a
         // single allocation. Going through `Data(line)` also sidesteps a Foundation
         // quirk where `Data.SubSequence.withUnsafeBytes` occasionally surfaces the
         // parent's full buffer rather than the slice's view.
         let lineData = Data(line)
+
+        // Codex rollout rows use top-level `turn_context` and
+        // `event_msg.token_count` types, so handle them before the Claude-only
+        // user/assistant fast path below.
+        if lineData.range(of: codexTurnContextMarker) != nil,
+           let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+           json["type"] as? String == "turn_context",
+           let payload = json["payload"] as? [String: Any],
+           let model = payload["model"] as? String,
+           !model.isEmpty {
+            codexModel = model
+            return
+        }
+
+        if lineData.range(of: codexTokenCountMarker) != nil,
+           let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+           let event = CodexUsageEvent.from(
+                line: json,
+                sessionId: codexSessionId,
+                model: codexModel
+           ) {
+            delta.codexUsageEvents.append(event)
+            return
+        }
 
         if lineData.range(of: Data("hook_permission_decision".utf8)) != nil,
            let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
@@ -403,6 +525,8 @@ public final class JSONLTailer: @unchecked Sendable {
     private static let typeMarker: [UInt8] = Array(#""type":""#.utf8)
     private static let userBytes: [UInt8] = Array(#"user""#.utf8)
     private static let assistantBytes: [UInt8] = Array(#"assistant""#.utf8)
+    private static let codexTurnContextMarker = Data(#""turn_context""#.utf8)
+    private static let codexTokenCountMarker = Data(#""token_count""#.utf8)
 
     private static func hasExactValue(
         _ ptr: UnsafePointer<UInt8>,

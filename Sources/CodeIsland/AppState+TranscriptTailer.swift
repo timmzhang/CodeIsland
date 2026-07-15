@@ -22,7 +22,18 @@ extension AppState {
         guard let path = session.transcriptPath, !path.isEmpty else { return }
         if attachedTranscriptPaths[sessionId] == path { return }
         attachedTranscriptPaths[sessionId] = path
-        transcriptTailer.attach(sessionId: sessionId, filePath: path)
+        let source = SessionSnapshot.normalizedSupportedSource(session.source)
+        let isCodex = source == "codex"
+        transcriptTailer.attach(
+            sessionId: sessionId,
+            filePath: path,
+            // A Codex file may be discovered after its first turn or after a
+            // missed hook. Replay it once, then continue from the retained
+            // offset; provider/store dedup makes launch-backfill overlap safe.
+            replayExisting: isCodex,
+            usageSessionId: session.providerSessionId ?? sessionId,
+            codexModel: isCodex ? session.model : nil
+        )
     }
 
     /// Stop watching a session's transcript. Called when the session is removed or
@@ -38,6 +49,9 @@ extension AppState {
         // before the session-existence guard below.
         if !delta.usageEvents.isEmpty {
             UsageManager.shared.ingestClaude(delta.usageEvents)
+        }
+        if !delta.codexUsageEvents.isEmpty {
+            UsageManager.shared.ingestCodex(delta.codexUsageEvents)
         }
 
         for permissionDecision in delta.permissionDecisions {

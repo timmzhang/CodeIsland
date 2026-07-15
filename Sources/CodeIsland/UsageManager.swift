@@ -76,6 +76,11 @@ final class UsageManager: @unchecked Sendable {
         claudeProvider.ingest(events)
     }
 
+    /// Entry point for Codex CLI rows discovered by the live rollout tailer.
+    func ingestCodex(_ events: [CodexUsageEvent]) {
+        codexProvider.ingest(events)
+    }
+
     /// Entry points for Codex app-server notifications
     /// (see `AppState.handleCodexAppServerMessage`).
     func ingestCodexTokenUsage(params: [String: AnyCodableLike]) {
