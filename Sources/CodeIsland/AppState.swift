@@ -1081,6 +1081,16 @@ final class AppState {
 
         let effects = reduceEvent(sessions: &sessions, event: event, maxHistory: maxHistory)
 
+        // Codex hooks carry the transcript path but not token counts. Attach
+        // before SessionEnd removes the session, then force an offset flush at
+        // turn/session boundaries; normal file extension events remain the
+        // primary real-time delivery path.
+        if event.rawJSON["_source"] as? String == "codex",
+           normalizedEventName == "Stop" || normalizedEventName == "SessionEnd" {
+            attachTranscriptTailerIfNeeded(sessionId: sessionId)
+            transcriptTailer.flush(sessionId: sessionId)
+        }
+
         // Backfill model after metadata extraction. Hooks are inconsistent across providers,
         // so retry with a cooldown instead of giving up permanently on the first miss.
         if sessions[sessionId]?.isRemote != true {

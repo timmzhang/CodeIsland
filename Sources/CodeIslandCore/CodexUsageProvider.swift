@@ -32,8 +32,9 @@ extension CodexUsageEvent {
 /// pairs, so the shared deduplicator (plus the store's persistent keys)
 /// keeps them from double-counting each other.
 ///
-/// Live coverage note: only Codex Desktop threads emit app-server
-/// notifications. Codex CLI sessions are picked up by the next backfill run.
+/// Codex Desktop emits app-server notifications. Codex CLI rollout files are
+/// streamed by `JSONLTailer` and forwarded through `ingest(_:)`; launch-time
+/// backfill reconciles anything written while CodeIsland was not running.
 public final class CodexUsageProvider: UsageProvider, @unchecked Sendable {
     public static let toolIdentifier = "codex"
     public var toolName: String { Self.toolIdentifier }
@@ -88,6 +89,37 @@ public final class CodexUsageProvider: UsageProvider, @unchecked Sendable {
         lock.lock()
         tailSink = nil
         lock.unlock()
+    }
+
+    /// Feed token-count rows observed by the live rollout transcript tailer.
+    /// The same deduplicator is shared with launch backfill and app-server
+    /// notifications, so races between all three delivery paths are harmless.
+    public func ingest(_ events: [CodexUsageEvent]) {
+        guard !events.isEmpty else { return }
+
+        lock.lock()
+        let sink = tailSink
+        var resolved: [CodexUsageEvent] = []
+        resolved.reserveCapacity(events.count)
+        for event in events {
+            let model = event.model ?? threadModels[event.sessionId]
+            if let model = event.model, threadModels[event.sessionId] == nil {
+                threadModels[event.sessionId] = model
+            }
+            resolved.append(CodexUsageEvent(
+                sessionId: event.sessionId,
+                model: model,
+                timestamp: event.timestamp,
+                last: event.last,
+                cumulativeTotalTokens: event.cumulativeTotalTokens
+            ))
+        }
+        lock.unlock()
+        guard let sink else { return }
+
+        let fresh = resolved.filter { deduplicator.markSeen($0) }
+        guard !fresh.isEmpty else { return }
+        sink(fresh.map { $0.normalized() })
     }
 
     /// Feed a `thread/tokenUsage/updated` notification's params. Samples the

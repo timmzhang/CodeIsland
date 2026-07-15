@@ -325,6 +325,35 @@ final class CodexUsageProviderTests: XCTestCase {
         XCTAssertEqual(collected.all.count, 2)
     }
 
+    func testRolloutIngestSharesDeduplicationWithAppServerNotifications() {
+        let provider = CodexUsageProvider(sessionsRoot: URL(fileURLWithPath: "/nonexistent"))
+        let collected = Collected<UsageEvent>()
+        provider.startTailing(sink: { collected.append($0) })
+
+        provider.ingest([
+            CodexUsageEvent(
+                sessionId: "t1",
+                model: "gpt-5.6",
+                timestamp: Date(),
+                last: CodexTokenCounts(
+                    inputTokens: 100,
+                    cachedInputTokens: 0,
+                    outputTokens: 50,
+                    totalTokens: 150
+                ),
+                cumulativeTotalTokens: 150
+            )
+        ])
+        provider.ingestTokenUsage(
+            params: tokenUsageParams(threadId: "t1", total: 150, input: 100, cached: 0, output: 50)
+        )
+
+        XCTAssertEqual(collected.all.count, 1)
+        XCTAssertEqual(collected.all[0].model, "gpt-5.6")
+        XCTAssertEqual(collected.all[0].inputTokens, 100)
+        XCTAssertEqual(collected.all[0].outputTokens, 50)
+    }
+
     func testIngestSkipsSamplesAlreadyCountedByBackfill() throws {
         let root = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: root) }
