@@ -396,6 +396,9 @@ public struct SessionSnapshot: Sendable {
         "com.stepfun.app": "StepFun",
         "com.openai.codex": "Codex",
         "ai.opencode.desktop": "OpenCode",
+        // Claude Desktop runs Claude sessions inside the native app. Recognizing
+        // the bundle keeps question/approval surfaces on the native-app path.
+        "com.anthropic.claudefordesktop": "Claude",
     ]
 
     /// Maps native app bundle IDs to their expected source identifier.
@@ -411,6 +414,7 @@ public struct SessionSnapshot: Sendable {
         "com.stepfun.app": "stepfun",
         "com.openai.codex": "codex",
         "ai.opencode.desktop": "opencode",
+        "com.anthropic.claudefordesktop": "claude",
     ]
 
     /// Short terminal/app name for display tag

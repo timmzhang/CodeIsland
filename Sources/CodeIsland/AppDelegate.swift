@@ -10,6 +10,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var panelController: PanelWindowController?
     private var hookServer: HookServer?
     private var hookRecoveryTimer: Timer?
+    private var claudeDesktopHookWatcher: ClaudeDesktopHookWatcher?
     private var lastHookCheck: Date = .distantPast
     private var globalShortcutMonitor: Any?
     private var localShortcutMonitor: Any?
@@ -43,6 +44,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 Self.log.warning("Failed to install hooks")
             }
         }
+
+        claudeDesktopHookWatcher = ClaudeDesktopHookWatcher()
+        claudeDesktopHookWatcher?.start()
 
         panelController = PanelWindowController(appState: appState)
         panelController?.showPanel()
@@ -146,6 +150,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         hookRecoveryTimer?.invalidate()
+        claudeDesktopHookWatcher?.stop()
+        claudeDesktopHookWatcher = nil
         teardownGlobalShortcut()
         UsageManager.shared.stop()
         appState.saveSessions()

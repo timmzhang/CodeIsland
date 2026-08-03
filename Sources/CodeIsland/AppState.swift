@@ -478,6 +478,7 @@ final class AppState {
         case "antigravity": return path.contains("/antigravity.app/contents/")
         case "workbuddy":   return path.contains("/workbuddy.app/contents/")
         case "hermes":      return path.contains("/hermes.app/contents/")
+        case "claude":      return path.contains("/claude.app/contents/")
         default:           return false
         }
     }

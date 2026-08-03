@@ -116,6 +116,9 @@ struct ConfigInstaller {
     private static let bridgePath = codeislandDir + "/codeisland-bridge"
     private static let hookScriptPath = codeislandDir + "/codeisland-hook.sh"
     private static let hookCommand = "~/.codeisland/codeisland-hook.sh"
+    private static let claudeDesktopSessionsRoot = NSHomeDirectory()
+        + "/Library/Application Support/Claude/local-agent-mode-sessions"
+    private static let claudeDesktopInstallLock = NSLock()
     private static let customCLIConfigsKey = SessionSnapshot.customCLIConfigsKey
     /// Absolute path for external CLI hooks — avoids tilde expansion issues in IDE environments
     private static let bridgeCommand = codeislandDir + "/codeisland-bridge"
@@ -650,6 +653,14 @@ struct ConfigInstaller {
             }
         }
 
+        // Claude Desktop Cowork sessions override CLAUDE_CONFIG_DIR with a
+        // session-scoped `.claude` directory. The regular ~/.claude hook above
+        // is therefore invisible to those processes; mirror the same managed
+        // hook into every Cowork config directory as well.
+        if isEnabled(source: "claude") {
+            _ = installClaudeDesktopSessionHooks(fm: fm)
+        }
+
         // Codex requires hooks = true in config.toml
         if isEnabled(source: "codex"),
            fm.fileExists(atPath: codexHome()) {
@@ -693,6 +704,8 @@ struct ConfigInstaller {
                 uninstallHooks(cli: cli, fm: fm)
             }
         }
+
+        uninstallClaudeDesktopSessionHooks(fm: fm)
 
         uninstallOpencodePlugin(fm: fm)
     }
@@ -762,7 +775,9 @@ struct ConfigInstaller {
             }
             guard let cli = allCLIs.first(where: { $0.source == source }) else { return false }
             if cli.source == "claude" {
-                return installClaudeHooks(cli: cli, fm: fm)
+                let installed = installClaudeHooks(cli: cli, fm: fm)
+                _ = installClaudeDesktopSessionHooks(fm: fm)
+                return installed
             } else if cli.source == "traecli" {
                 return installTraecliHooks(fm: fm)
             } else {
@@ -785,6 +800,9 @@ struct ConfigInstaller {
                     uninstallTraecliHooks(fm: fm)
                 } else {
                     uninstallHooks(cli: cli, fm: fm)
+                }
+                if cli.source == "claude" {
+                    uninstallClaudeDesktopSessionHooks(fm: fm)
                 }
             }
             return true
@@ -864,6 +882,10 @@ struct ConfigInstaller {
            fm.fileExists(atPath: (opencodeConfigPath as NSString).deletingLastPathComponent),
            !isOpencodePluginInstalled(fm: fm) {
             if installOpencodePlugin(fm: fm) { repaired.append("OpenCode") }
+        }
+        if isEnabled(source: "claude") {
+            let installed = installClaudeDesktopSessionHooks(fm: fm)
+            if !installed.isEmpty { repaired.append("Claude Desktop") }
         }
         // pi extension
         if isEnabled(source: "pi"),
@@ -1056,6 +1078,73 @@ struct ConfigInstaller {
     }
 
     // MARK: - Claude Code (special: uses hook script)
+
+    /// Find the session-scoped Claude config directories created by Claude
+    /// Desktop Cowork. Desktop launches its embedded Claude Code with
+    /// `CLAUDE_CONFIG_DIR=<local-session>/.claude`, so ~/.claude/settings.json
+    /// is not a user setting source for that process.
+    private static func claudeDesktopSessionConfigs(
+        sessionsRoot: String,
+        fm: FileManager
+    ) -> [CLIConfig] {
+        guard fm.fileExists(atPath: sessionsRoot),
+              let enumerator = fm.enumerator(
+                at: URL(fileURLWithPath: sessionsRoot),
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: []
+              ),
+              let base = builtInCLIs.first(where: { $0.source == "claude" })
+        else { return [] }
+
+        var configs: [CLIConfig] = []
+        for case let url as URL in enumerator {
+            guard url.lastPathComponent == ".claude" else { continue }
+            enumerator.skipDescendants()
+            let settingsPath = url.appendingPathComponent("settings.json").path
+            configs.append(CLIConfig(
+                name: "Claude Desktop",
+                source: base.source,
+                configPath: settingsPath,
+                configKey: base.configKey,
+                format: base.format,
+                events: base.events,
+                versionedEvents: base.versionedEvents
+            ))
+        }
+        return configs
+    }
+
+    /// Install hooks into Claude Desktop's isolated Cowork settings. Returns
+    /// the settings paths that changed during this pass.
+    @discardableResult
+    static func installClaudeDesktopSessionHooks(
+        sessionsRoot: String = claudeDesktopSessionsRoot,
+        fm: FileManager = .default
+    ) -> [String] {
+        guard isEnabled(source: "claude") else { return [] }
+        claudeDesktopInstallLock.lock()
+        defer { claudeDesktopInstallLock.unlock() }
+
+        var changed: [String] = []
+        for cli in claudeDesktopSessionConfigs(sessionsRoot: sessionsRoot, fm: fm) {
+            let wasInstalled = isHooksInstalled(for: cli, fm: fm)
+            if installClaudeHooks(cli: cli, fm: fm), !wasInstalled {
+                changed.append(cli.fullPath)
+            }
+        }
+        return changed
+    }
+
+    static func uninstallClaudeDesktopSessionHooks(
+        sessionsRoot: String = claudeDesktopSessionsRoot,
+        fm: FileManager = .default
+    ) {
+        claudeDesktopInstallLock.lock()
+        defer { claudeDesktopInstallLock.unlock() }
+        for cli in claudeDesktopSessionConfigs(sessionsRoot: sessionsRoot, fm: fm) {
+            uninstallHooks(cli: cli, fm: fm)
+        }
+    }
 
     private static func installClaudeHooks(cli: CLIConfig, fm: FileManager) -> Bool {
         let dir = cli.dirPath
