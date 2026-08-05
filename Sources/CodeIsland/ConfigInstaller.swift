@@ -189,7 +189,10 @@ struct ConfigInstaller {
             format: .nested,
             events: [
                 ("SessionStart", 5, false),
-                ("SessionEnd", 5, true),
+                // Codex clamps SessionEnd hooks to a 3s ceiling and prints a
+                // "clamping SessionEnd hook timeout to 3s" warning for anything
+                // higher — write 3 up front so the config installs cleanly.
+                ("SessionEnd", 3, true),
                 ("UserPromptSubmit", 5, false),
                 ("PreToolUse", 5, false),
                 ("PostToolUse", 5, false),
