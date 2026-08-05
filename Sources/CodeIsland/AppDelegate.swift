@@ -19,6 +19,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ProcessInfo.processInfo.disableAutomaticTermination("CodeIsland must stay running")
         ProcessInfo.processInfo.disableSuddenTermination()
+        switch LoginItemManager.shared.reconcileOnLaunch() {
+        case .repaired:
+            Self.log.info("Login item registration migrated to the current installed app")
+        case .removedTransient:
+            Self.log.info("Removed login item registration owned by a temporary build")
+            let installedApp = URL(fileURLWithPath: "/Applications/CodeIsland.app")
+            let currentApp = Bundle.main.bundleURL.standardizedFileURL.resolvingSymlinksInPath()
+            if FileManager.default.fileExists(atPath: installedApp.path),
+               currentApp != installedApp.standardizedFileURL.resolvingSymlinksInPath() {
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.createsNewApplicationInstance = true
+                NSWorkspace.shared.openApplication(at: installedApp, configuration: configuration) { _, error in
+                    if let error {
+                        Self.log.error("Failed to open installed app after login item migration: \(error.localizedDescription, privacy: .public)")
+                    }
+                    DispatchQueue.main.async {
+                        NSApp.terminate(nil)
+                    }
+                }
+                return
+            }
+        case .failed(let message):
+            Self.log.error("Login item registration migration failed: \(message, privacy: .public)")
+        case .disabled, .skippedTransient, .current:
+            break
+        }
         // Pre-set app icon so Dock/menu bar use the packaged bundle icon.
         NSApp.applicationIconImage = SettingsWindowController.bundleAppIcon()
         SettingsWindowController.shared.appState = appState
