@@ -86,6 +86,10 @@ swift build && ./.build/debug/CodeIsland
 
 # 发布模式（通用二进制：Apple Silicon + Intel）
 ./build.sh
+open /Applications/CodeIsland.app
+
+# 不安装的一次性 release 预览（不要在此版本启用“登录时打开”）
+./build.sh --no-install
 open .build/release/CodeIsland.app
 ```
 

@@ -86,6 +86,10 @@ swift build && ./.build/debug/CodeIsland
 
 # Release (universal binary: Apple Silicon + Intel)
 ./build.sh
+open /Applications/CodeIsland.app
+
+# Disposable release preview without installing (never enable Launch at Login here)
+./build.sh --no-install
 open .build/release/CodeIsland.app
 ```
 
