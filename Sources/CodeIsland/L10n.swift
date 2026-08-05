@@ -55,6 +55,9 @@ final class L10n: ObservableObject {
 
         // General
         "launch_at_login": "Launch at Login",
+        "launch_at_login_error_title": "Could Not Update Login Item",
+        "launch_at_login_transient_error": "Launch at Login cannot be enabled from a temporary build. Open the installed CodeIsland app and try again.",
+        "launch_at_login_update_failed": "Could not update Launch at Login: %@",
         "allow_horizontal_drag": "Allow Horizontal Drag",
         "allow_horizontal_drag_desc": "Enable dragging the panel left or right along the menu bar",
         "display": "Display",
@@ -430,6 +433,9 @@ final class L10n: ObservableObject {
 
         // General
         "launch_at_login": "登录时打开",
+        "launch_at_login_error_title": "无法更新登录项",
+        "launch_at_login_transient_error": "不能从临时构建版本启用登录时打开。请启动已安装的 CodeIsland 后重试。",
+        "launch_at_login_update_failed": "无法更新登录时打开：%@",
         "allow_horizontal_drag": "允许水平拖动面板",
         "allow_horizontal_drag_desc": "开启后可沿菜单栏左右拖动面板位置",
         "display": "显示器",
@@ -805,6 +811,9 @@ final class L10n: ObservableObject {
 
         // General
         "launch_at_login": "ログイン時に起動",
+        "launch_at_login_error_title": "ログイン項目を更新できません",
+        "launch_at_login_transient_error": "一時ビルドからログイン時起動を有効にできません。インストール済みの CodeIsland を開いて再試行してください。",
+        "launch_at_login_update_failed": "ログイン時起動を更新できませんでした: %@",
         "allow_horizontal_drag": "横方向ドラッグを許可",
         "allow_horizontal_drag_desc": "パネルをメニューバーに沿って左右へドラッグできるようにします",
         "display": "ディスプレイ",
@@ -1180,6 +1189,9 @@ final class L10n: ObservableObject {
 
         // General
         "launch_at_login": "로그인 시 실행",
+        "launch_at_login_error_title": "로그인 항목을 업데이트할 수 없음",
+        "launch_at_login_transient_error": "임시 빌드에서는 로그인 시 실행을 활성화할 수 없습니다. 설치된 CodeIsland를 열고 다시 시도하세요.",
+        "launch_at_login_update_failed": "로그인 시 실행을 업데이트할 수 없습니다: %@",
         "allow_horizontal_drag": "가로 드래그 허용",
         "allow_horizontal_drag_desc": "패널을 메뉴 막대를 따라 좌우로 드래그할 수 있게 합니다",
         "display": "디스플레이",
@@ -1555,6 +1567,9 @@ final class L10n: ObservableObject {
 
         // General
         "launch_at_login": "Girişte Aç",
+        "launch_at_login_error_title": "Giriş Öğesi Güncellenemedi",
+        "launch_at_login_transient_error": "Girişte Aç geçici bir derlemeden etkinleştirilemez. Yüklü CodeIsland uygulamasını açıp yeniden deneyin.",
+        "launch_at_login_update_failed": "Girişte Aç güncellenemedi: %@",
         "allow_horizontal_drag": "Yatay Sürüklemeye İzin Ver",
         "allow_horizontal_drag_desc": "Paneli menü çubuğu boyunca sola veya sağa sürüklemeyi etkinleştir",
         "display": "Ekran",

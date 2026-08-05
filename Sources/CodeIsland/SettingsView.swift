@@ -292,9 +292,11 @@ private struct GeneralPage: View {
     @AppStorage(SettingsKey.displayChoice) private var displayChoice = SettingsDefaults.displayChoice
     @AppStorage(SettingsKey.allowHorizontalDrag) private var allowHorizontalDrag = SettingsDefaults.allowHorizontalDrag
     @State private var launchAtLogin: Bool
+    @State private var launchAtLoginError: LoginItemManagerError?
 
     init() {
         _launchAtLogin = State(initialValue: SettingsManager.shared.launchAtLogin)
+        _launchAtLoginError = State(initialValue: LoginItemManager.shared.lastError)
     }
 
     var body: some View {
@@ -308,10 +310,19 @@ private struct GeneralPage: View {
                     Text("한국어").tag("ko")
                     Text("Türkçe").tag("tr")
                 }
-                Toggle(l10n["launch_at_login"], isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { _, v in
-                        SettingsManager.shared.launchAtLogin = v
+                Toggle(l10n["launch_at_login"], isOn: Binding(
+                    get: { launchAtLogin },
+                    set: { enabled in
+                        switch SettingsManager.shared.setLaunchAtLogin(enabled) {
+                        case .success:
+                            launchAtLogin = enabled
+                            launchAtLoginError = nil
+                        case .failure(let error):
+                            launchAtLogin = SettingsManager.shared.launchAtLogin
+                            launchAtLoginError = error
+                        }
                     }
+                ))
                 Toggle(l10n["allow_horizontal_drag"], isOn: $allowHorizontalDrag)
                     .onChange(of: allowHorizontalDrag) { _, enabled in
                         if !enabled {
@@ -333,6 +344,28 @@ private struct GeneralPage: View {
             }
         }
         .formStyle(.grouped)
+        .alert(
+            l10n["launch_at_login_error_title"],
+            isPresented: Binding(
+                get: { launchAtLoginError != nil },
+                set: { if !$0 { launchAtLoginError = nil } }
+            )
+        ) {
+            Button(l10n["ok"], role: .cancel) {}
+        } message: {
+            if let error = launchAtLoginError {
+                Text(loginItemErrorMessage(error))
+            }
+        }
+    }
+
+    private func loginItemErrorMessage(_ error: LoginItemManagerError) -> String {
+        switch error {
+        case .transientBundle:
+            return l10n["launch_at_login_transient_error"]
+        case .operationFailed(let detail):
+            return String(format: l10n["launch_at_login_update_failed"], detail)
+        }
     }
 }
 

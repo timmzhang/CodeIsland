@@ -1,5 +1,4 @@
 import AppKit
-import ServiceManagement
 
 enum AppVersion {
     /// Update this each release. Used as fallback when Info.plist is unavailable (debug builds).
@@ -237,15 +236,12 @@ class SettingsManager {
     }
 
     var launchAtLogin: Bool {
-        get { SMAppService.mainApp.status == .enabled }
-        set {
-            do {
-                if newValue { try SMAppService.mainApp.register() }
-                else { try SMAppService.mainApp.unregister() }
-            } catch {
-                // Login item update may fail silently in sandboxed environments
-            }
-        }
+        LoginItemManager.shared.isEnabled
+    }
+
+    @discardableResult
+    func setLaunchAtLogin(_ enabled: Bool) -> Result<Void, LoginItemManagerError> {
+        LoginItemManager.shared.setEnabled(enabled)
     }
 
     var displayChoice: String {
