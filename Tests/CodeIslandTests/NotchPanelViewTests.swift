@@ -224,4 +224,76 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertEqual(timeline.clickPointY, 16.0, accuracy: 0.1)
     }
 
+    // MARK: - Usage popover retracts the panel body (p-w6c9)
+
+    func testUsagePopoverRetractsSessionListBody() {
+        XCTAssertTrue(
+            UsagePopoverLayout.showsPanelBody(expanded: true, popoverVisible: false, surface: .sessionList)
+        )
+        XCTAssertFalse(
+            UsagePopoverLayout.showsPanelBody(expanded: true, popoverVisible: true, surface: .sessionList)
+        )
+        XCTAssertFalse(
+            UsagePopoverLayout.showsPanelBody(expanded: true, popoverVisible: true, surface: .completionCard(sessionId: "s1"))
+        )
+    }
+
+    func testUsagePopoverKeepsPendingDecisionCardsVisible() {
+        XCTAssertTrue(
+            UsagePopoverLayout.showsPanelBody(expanded: true, popoverVisible: true, surface: .approvalCard(sessionId: "s1"))
+        )
+        XCTAssertTrue(
+            UsagePopoverLayout.showsPanelBody(expanded: true, popoverVisible: true, surface: .questionCard(sessionId: "s1"))
+        )
+    }
+
+    func testCollapsedPanelNeverShowsBody() {
+        XCTAssertFalse(
+            UsagePopoverLayout.showsPanelBody(expanded: false, popoverVisible: false, surface: .sessionList)
+        )
+    }
+
+    func testDeferredCollapseFiresWhenCursorLeftThroughPopover() {
+        XCTAssertTrue(
+            UsagePopoverLayout.collapsesAfterPopoverHidden(
+                surface: .sessionList, panelHovered: false, collapseOnMouseLeave: true
+            )
+        )
+    }
+
+    func testDeferredCollapseSkippedWhenCursorIsBackOnPanel() {
+        XCTAssertFalse(
+            UsagePopoverLayout.collapsesAfterPopoverHidden(
+                surface: .sessionList, panelHovered: true, collapseOnMouseLeave: true
+            )
+        )
+    }
+
+    func testDeferredCollapseRespectsCollapseOnMouseLeaveSetting() {
+        XCTAssertFalse(
+            UsagePopoverLayout.collapsesAfterPopoverHidden(
+                surface: .sessionList, panelHovered: false, collapseOnMouseLeave: false
+            )
+        )
+    }
+
+    func testDeferredCollapseSkipsDetailPageAndPendingCards() {
+        // Clicking「查看详情」dismisses the popover — that must not collapse the panel.
+        XCTAssertFalse(
+            UsagePopoverLayout.collapsesAfterPopoverHidden(
+                surface: .usageDetail, panelHovered: false, collapseOnMouseLeave: true
+            )
+        )
+        XCTAssertFalse(
+            UsagePopoverLayout.collapsesAfterPopoverHidden(
+                surface: .approvalCard(sessionId: "s1"), panelHovered: false, collapseOnMouseLeave: true
+            )
+        )
+        XCTAssertFalse(
+            UsagePopoverLayout.collapsesAfterPopoverHidden(
+                surface: .collapsed, panelHovered: false, collapseOnMouseLeave: true
+            )
+        )
+    }
+
 }

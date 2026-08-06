@@ -8,6 +8,44 @@ enum NotchWidthMetrics {
     }
 }
 
+/// Layout rules for the「今日 Token 用量」hover popover ↔ expanded panel pair.
+///
+/// The popover is an overlay on the panel itself, so without these rules it
+/// stacks on top of the session list. Instead the panel retracts its body while
+/// the popover is up: the toolbar (which owns the entry the mouse is resting on)
+/// stays, everything below it goes away.
+enum UsagePopoverLayout {
+    /// Whether the popover is allowed to retract the body of `surface`.
+    /// Approval/question cards own a decision the user still has to make — they
+    /// are never hidden behind a hover popover.
+    static func retractsBody(of surface: IslandSurface) -> Bool {
+        switch surface {
+        case .approvalCard, .questionCard: return false
+        default: return true
+        }
+    }
+
+    /// Whether the below-notch panel body should render.
+    static func showsPanelBody(expanded: Bool, popoverVisible: Bool, surface: IslandSurface) -> Bool {
+        guard expanded else { return false }
+        return !(popoverVisible && retractsBody(of: surface))
+    }
+
+    /// The popover extends below a retracted panel, so moving the mouse from the
+    /// toolbar entry into it reads as leaving the panel. That collapse is
+    /// deferred (`NotchPanelView.pendingCollapseAfterPopover`) until the popover
+    /// itself hides — otherwise the panel body would flash back in on the way out.
+    static func collapsesAfterPopoverHidden(
+        surface: IslandSurface,
+        panelHovered: Bool,
+        collapseOnMouseLeave: Bool
+    ) -> Bool {
+        guard collapseOnMouseLeave, !panelHovered else { return false }
+        guard surface.isExpanded, surface != .usageDetail else { return false }
+        return retractsBody(of: surface)
+    }
+}
+
 func orderedSessionListIds(_ sessions: [String: SessionSnapshot]) -> [String] {
     sessions.sorted { lhs, rhs in
         let lhsPriority = sessionListStatusPriority(lhs.value.status)
@@ -68,6 +106,9 @@ struct NotchPanelView: View {
     @State private var displayedToolStatus: Bool = SettingsDefaults.showToolStatus
     /// Hover state shared by the usage toolbar entry and its detail popover
     @State private var usagePopover = UsagePopoverState()
+    /// Set when the mouse leaves the panel through the usage popover — the
+    /// collapse waits for the popover to hide instead of firing behind it.
+    @State private var pendingCollapseAfterPopover = false
 
     private var isActive: Bool { !appState.sessions.isEmpty }
     /// First launch / no-session state should still render a visible marker so the app
@@ -81,6 +122,15 @@ struct NotchPanelView: View {
     }
     private var shouldShowExpanded: Bool {
         showBar && appState.surface.isExpanded
+    }
+    /// Expanded toolbar stays put while the usage popover is up; the body below
+    /// it retracts so the popover doesn't cover the session list.
+    private var showsPanelBody: Bool {
+        UsagePopoverLayout.showsPanelBody(
+            expanded: shouldShowExpanded,
+            popoverVisible: usagePopover.visible,
+            surface: appState.surface
+        )
     }
 
     /// Mascot size — fits within the menu bar height
@@ -145,7 +195,7 @@ struct NotchPanelView: View {
                 }
 
                 // Below-notch expanded content
-                if shouldShowExpanded {
+                if showsPanelBody {
                     Line()
                         .stroke(.white.opacity(0.15), style: StrokeStyle(lineWidth: 0.5, dash: [4, 3]))
                         .frame(height: 0.5)
@@ -223,7 +273,7 @@ struct NotchPanelView: View {
             .background(
                 NotchPanelShape(
                     topExtension: shouldShowExpanded ? 14 : 3,
-                    bottomRadius: shouldShowExpanded ? 24 : 12,
+                    bottomRadius: showsPanelBody ? 24 : 12,
                     minHeight: notchHeight
                 )
                 .fill(.black)
@@ -300,6 +350,8 @@ struct NotchPanelView: View {
 
                 isHovered = hovering
                 if hovering {
+                    // Back on the panel — any collapse deferred to the popover is off
+                    pendingCollapseAfterPopover = false
                     // Delay expansion to avoid accidental triggers
                     hoverTimer?.invalidate()
                     hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
@@ -335,9 +387,14 @@ struct NotchPanelView: View {
                     hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { _ in
                         Task { @MainActor in
                             guard !isHovered else { return }
-                            // The usage popover can extend below a short panel —
-                            // hovering it must not count as leaving the panel.
-                            guard !usagePopover.popoverHovered else { return }
+                            // The usage popover extends below the retracted panel —
+                            // hovering it must not count as leaving the panel. Collapse
+                            // once the popover hides instead of dropping the panel out
+                            // from under the cursor.
+                            if usagePopover.popoverHovered {
+                                pendingCollapseAfterPopover = true
+                                return
+                            }
                             withAnimation(NotchAnimation.close) {
                                 appState.surface = .collapsed
                             }
@@ -358,6 +415,20 @@ struct NotchPanelView: View {
             .onChange(of: appState.surface) { _, newSurface in
                 if newSurface == .collapsed || newSurface == .usageDetail {
                     usagePopover.dismiss()
+                    pendingCollapseAfterPopover = false
+                }
+            }
+            .onChange(of: usagePopover.visible) { _, nowVisible in
+                guard !nowVisible, pendingCollapseAfterPopover else { return }
+                pendingCollapseAfterPopover = false
+                guard UsagePopoverLayout.collapsesAfterPopoverHidden(
+                    surface: appState.surface,
+                    panelHovered: isHovered,
+                    collapseOnMouseLeave: SettingsManager.shared.collapseOnMouseLeave
+                ) else { return }
+                withAnimation(NotchAnimation.close) {
+                    appState.cancelCompletionQueue()
+                    appState.surface = .collapsed
                 }
             }
 
@@ -366,6 +437,7 @@ struct NotchPanelView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(NotchAnimation.open, value: appState.surface)
+        .animation(NotchAnimation.open, value: showsPanelBody)
     }
 }
 
