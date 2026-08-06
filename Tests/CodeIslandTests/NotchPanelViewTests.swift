@@ -247,6 +247,15 @@ final class NotchPanelViewTests: XCTestCase {
         )
     }
 
+    /// Clicking the entry opens the detail page with the cursor still resting on
+    /// it, so the popover state turns visible again behind the suppressed
+    /// overlay. That must not retract the page the click just opened.
+    func testUsageDetailPageIsNeverRetracted() {
+        XCTAssertTrue(
+            UsagePopoverLayout.showsPanelBody(expanded: true, popoverVisible: true, surface: .usageDetail)
+        )
+    }
+
     func testCollapsedPanelNeverShowsBody() {
         XCTAssertFalse(
             UsagePopoverLayout.showsPanelBody(expanded: false, popoverVisible: false, surface: .sessionList)

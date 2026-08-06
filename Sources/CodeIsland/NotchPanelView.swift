@@ -16,11 +16,14 @@ enum NotchWidthMetrics {
 /// stays, everything below it goes away.
 enum UsagePopoverLayout {
     /// Whether the popover is allowed to retract the body of `surface`.
-    /// Approval/question cards own a decision the user still has to make — they
-    /// are never hidden behind a hover popover.
+    ///
+    /// - Approval/question cards own a decision the user still has to make.
+    /// - The usage detail page suppresses the popover entirely, and the cursor
+    ///   is left resting on the entry right after the click that opened it —
+    ///   retracting there would make the page vanish a moment after it appeared.
     static func retractsBody(of surface: IslandSurface) -> Bool {
         switch surface {
-        case .approvalCard, .questionCard: return false
+        case .approvalCard, .questionCard, .usageDetail: return false
         default: return true
         }
     }
@@ -41,7 +44,7 @@ enum UsagePopoverLayout {
         collapseOnMouseLeave: Bool
     ) -> Bool {
         guard collapseOnMouseLeave, !panelHovered else { return false }
-        guard surface.isExpanded, surface != .usageDetail else { return false }
+        guard surface.isExpanded else { return false }
         return retractsBody(of: surface)
     }
 }
@@ -418,8 +421,8 @@ struct NotchPanelView: View {
                     pendingCollapseAfterPopover = false
                 }
             }
-            .onChange(of: usagePopover.visible) { _, nowVisible in
-                guard !nowVisible, pendingCollapseAfterPopover else { return }
+            .onChange(of: usagePopover.autoHideCount) { _, _ in
+                guard pendingCollapseAfterPopover else { return }
                 pendingCollapseAfterPopover = false
                 guard UsagePopoverLayout.collapsesAfterPopoverHidden(
                     surface: appState.surface,

@@ -12,6 +12,10 @@ final class UsagePopoverState {
     private(set) var visible = false
     private(set) var entryHovered = false
     private(set) var popoverHovered = false
+    /// Bumped only when the popover hides on its own (hover-out), never when a
+    /// click calls `dismiss()` on the way to the detail page. The panel keys its
+    /// deferred collapse off this so navigating can't be mistaken for leaving.
+    private(set) var autoHideCount = 0
 
     private var showTimer: Timer?
     private var hideTimer: Timer?
@@ -58,7 +62,10 @@ final class UsagePopoverState {
             Task { @MainActor in
                 guard let self else { return }
                 self.hideTimer = nil
-                if !self.entryHovered && !self.popoverHovered { self.setVisible(false) }
+                guard !self.entryHovered, !self.popoverHovered else { return }
+                let wasVisible = self.visible
+                self.setVisible(false)
+                if wasVisible { self.autoHideCount += 1 }
             }
         }
     }
