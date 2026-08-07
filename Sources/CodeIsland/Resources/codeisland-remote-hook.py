@@ -5,7 +5,7 @@ import socket
 import subprocess
 import sys
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 # Per-user socket path (#193): CodeIsland injects CODEISLAND_SOCKET_PATH via the hook
 # command, but fall back to a uid-scoped path so multiple users on a shared host never
 # collide on a single /tmp/codeisland.sock.
@@ -43,7 +43,7 @@ def _normalize_event(name):
         return "Stop"
     # Gemini
     if name == "BeforeTool":
-        return "PreToolUse"
+        return "PermissionRequest"
     if name == "AfterTool":
         return "PostToolUse"
     if name == "BeforeAgent":
@@ -88,6 +88,20 @@ def _normalize_event(name):
         return "PostCompact"
     if name == "notification":
         return "Notification"
+    # Hermes (Nous Research) — snake_case, diverged from Claude/Gemini (#226).
+    # `subagent_stop` is already handled above.
+    if name == "pre_tool_call":
+        return "PreToolUse"
+    if name == "post_tool_call":
+        return "PostToolUse"
+    if name == "pre_llm_call":
+        return "UserPromptSubmit"
+    if name == "on_session_start":
+        return "SessionStart"
+    if name == "on_session_end":
+        return "SessionEnd"
+    if name == "on_session_reset":
+        return "SessionEnd"
     return name
 
 
@@ -97,6 +111,19 @@ def _claude_jsonl_path(session_id, cwd):
     home = os.path.expanduser("~")
     project_dir = cwd.replace("/", "-").replace(".", "-")
     path = os.path.join(home, ".claude", "projects", project_dir, f"{session_id}.jsonl")
+    return path if os.path.exists(path) else None
+
+
+def _codeisland_project_dir_encoded(cwd):
+    return "".join("-" if ch == "/" or ch == " " or ord(ch) > 127 else ch for ch in cwd)
+
+
+def _qoder_jsonl_path(session_id, cwd):
+    if not session_id or not cwd:
+        return None
+    home = os.path.expanduser("~")
+    project_dir = _codeisland_project_dir_encoded(cwd)
+    path = os.path.join(home, ".qoder", "projects", project_dir, f"{session_id}.jsonl")
     return path if os.path.exists(path) else None
 
 
@@ -155,6 +182,10 @@ def _scan_session_jsonl(path):
 
 def _scan_claude_jsonl(session_id, cwd):
     return _scan_session_jsonl(_claude_jsonl_path(session_id, cwd))
+
+
+def _scan_qoder_jsonl(session_id, cwd):
+    return _scan_session_jsonl(_qoder_jsonl_path(session_id, cwd))
 
 
 def _scan_codebuddy_jsonl(session_id, cwd):
@@ -252,6 +283,16 @@ def main():
             if prompt:
                 payload["prompt"] = prompt
 
+    if SOURCE == "qoder":
+        extras = _scan_qoder_jsonl(session_id, cwd)
+        for key, value in extras.items():
+            if value and not payload.get(key):
+                payload[key] = value
+        if normalized_event == "UserPromptSubmit" and not payload.get("prompt"):
+            prompt = extras.get("last_user_message")
+            if prompt:
+                payload["prompt"] = prompt
+
     if SOURCE == "codebuddy":
         extras = _scan_codebuddy_jsonl(session_id, cwd)
         for key, value in extras.items():
@@ -268,7 +309,23 @@ def main():
     )
     response = _send_event(payload, expects_response)
     if response:
-        print(response)
+        if SOURCE == "google-antigravity" or SOURCE == "gemini":
+            try:
+                res_obj = json.loads(response)
+                behavior = res_obj.get("hookSpecificOutput", {}).get("decision", {}).get("behavior")
+                if behavior in ("allow", "always"):
+                    print(json.dumps({"decision": "allow"}))
+                else:
+                    print(json.dumps({"decision": "deny"}))
+            except Exception:
+                if '"behavior":"allow"' in response or '"behavior":"always"' in response:
+                    print(json.dumps({"decision": "allow"}))
+                elif '"behavior":"deny"' in response:
+                    print(json.dumps({"decision": "deny"}))
+                else:
+                    print(response)
+        else:
+            print(response)
     return 0
 
 

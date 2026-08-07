@@ -26,6 +26,16 @@ final class ConfigInstallerTests: XCTestCase {
         let hooks = try XCTUnwrap(hooksAny as? [Any], file: file, line: line)
         return hooks.compactMap { $0 as? [String: Any] }
     }
+
+    func testQoderConfigIncludesPermissionRequestHook() throws {
+        let cli = try XCTUnwrap(ConfigInstaller.allCLIs.first { $0.source == "qoder" })
+        XCTAssertEqual(cli.format, .claude)
+        XCTAssertEqual(cli.configPath, ".qoder/settings.json")
+        let permission = try XCTUnwrap(cli.events.first { $0.0 == "PermissionRequest" })
+        XCTAssertEqual(permission.1, 86400)
+        XCTAssertFalse(permission.2)
+    }
+
     func testRemoveManagedHookEntriesAlsoPrunesLegacyVibeIslandHooks() throws {
         let hooks: [String: Any] = [
             "SessionEnd": [
@@ -162,6 +172,228 @@ final class ConfigInstallerTests: XCTestCase {
         )
     }
 
+    func testCodexSessionEndTimeoutRespectsTeardownCapAndRepairsStaleConfig() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let staleConfig = """
+        {
+          "hooks": {
+            "SessionEnd": [
+              {
+                "hooks": [
+                  {
+                    "type": "command",
+                    "command": "/Users/test/.codeisland/codeisland-bridge --source codex",
+                    "timeout": 5
+                  }
+                ]
+              }
+            ]
+          }
+        }
+        """
+        let configPath = tempDir.appendingPathComponent("hooks.json")
+        try staleConfig.write(to: configPath, atomically: true, encoding: .utf8)
+
+        var codex = try XCTUnwrap(ConfigInstaller.allCLIs.first { $0.source == "codex" })
+        let tempPath = tempDir.path
+        codex.rootOverride = { tempPath }
+
+        let configuredTimeout = try XCTUnwrap(codex.events.first { $0.0 == "SessionEnd" }?.1)
+        XCTAssertEqual(configuredTimeout, 3)
+        XCTAssertTrue(ConfigInstaller.installExternalHooks(cli: codex, fm: fm))
+
+        let data = try Data(contentsOf: configPath)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let hooks = try XCTUnwrap(root["hooks"] as? [String: Any])
+        let sessionEnd = try XCTUnwrap(hooks["SessionEnd"] as? [[String: Any]])
+        let hookList = try XCTUnwrap(sessionEnd.first?["hooks"] as? [[String: Any]])
+        XCTAssertEqual(hookList.first?["timeout"] as? Int, 3)
+    }
+
+    func testTraeIDEHooksUseOfficialNestedSchema() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let configPath = tempDir.appendingPathComponent("hooks.json").path
+        let cli = CLIConfig(
+            name: "Trae",
+            source: "trae",
+            configPath: configPath,
+            configKey: "hooks",
+            format: .traeIDE,
+            events: [("beforeSubmitPrompt", 5, false)]
+        )
+
+        XCTAssertTrue(ConfigInstaller.installExternalHooks(cli: cli, fm: fm))
+
+        let data = try XCTUnwrap(fm.contents(atPath: configPath))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(root["version"] as? Int, 1)
+        let hooks = try XCTUnwrap(root["hooks"] as? [String: Any])
+        let entries = try XCTUnwrap(hooks["beforeSubmitPrompt"] as? [[String: Any]])
+        let entry = try XCTUnwrap(entries.first)
+        XCTAssertEqual(entry["matcher"] as? String, "*")
+        XCTAssertEqual(entry["loop_limit"] as? Int, 5)
+        let hookList = try XCTUnwrap(entry["hooks"] as? [[String: Any]])
+        let hook = try XCTUnwrap(hookList.first)
+        XCTAssertEqual(hook["type"] as? String, "command")
+        XCTAssertEqual(hook["timeout"] as? Int, 5)
+        let command = try XCTUnwrap(hook["command"] as? String)
+        XCTAssertTrue(command.contains("codeisland-bridge --source trae"))
+        XCTAssertTrue(command.contains("--event beforeSubmitPrompt"))
+    }
+
+    func testBuiltInTraeKeepsLegacyIDEHooksPath() throws {
+        let cli = try XCTUnwrap(ConfigInstaller.allCLIs.first { $0.source == "trae" })
+
+        XCTAssertEqual(cli.configPath, ".trae/hooks.json")
+        XCTAssertEqual(cli.format.storageValue, HookFormat.traeIDE.storageValue)
+        XCTAssertTrue(cli.events.contains { $0.0 == "beforeReadFile" })
+    }
+
+    func testTraeCLINextUsesTraeXHooksSchema() throws {
+        let cli = try XCTUnwrap(ConfigInstaller.allCLIs.first { $0.source == "traecli-next" })
+
+        XCTAssertEqual(cli.configPath, ".trae/cli/hooks.json")
+        XCTAssertEqual(cli.format.storageValue, HookFormat.nested.storageValue)
+        XCTAssertEqual(cli.bridgeSourceOverride, "traecli")
+
+        let eventNames = cli.events.map { $0.0 }
+        XCTAssertTrue(eventNames.contains("PreToolUse"))
+        XCTAssertTrue(eventNames.contains("PermissionRequest"))
+        XCTAssertTrue(eventNames.contains("PostToolUseFailure"))
+        XCTAssertFalse(eventNames.contains("beforeReadFile"))
+    }
+
+    func testTraeCLINextInstallUsesSupportedEventsAndCleansLegacyIDEEvents() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let configDir = tempDir.appendingPathComponent(".trae/cli")
+        try fm.createDirectory(at: configDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let configPath = configDir.appendingPathComponent("hooks.json").path
+        let legacy = """
+        {
+          "hooks": {
+            "beforeReadFile": [
+              {
+                "matcher": "*",
+                "loop_limit": 5,
+                "hooks": [
+                  {
+                    "type": "command",
+                    "command": "\(NSHomeDirectory())/.codeisland/codeisland-bridge --source trae --event beforeReadFile",
+                    "timeout": 5
+                  }
+                ]
+              }
+            ],
+            "Stop": [
+              {
+                "hooks": [
+                  {
+                    "type": "command",
+                    "command": "/usr/local/bin/user-stop",
+                    "timeout": 5
+                  }
+                ]
+              }
+            ]
+          }
+        }
+        """
+        try legacy.write(toFile: configPath, atomically: true, encoding: .utf8)
+
+        let cli = CLIConfig(
+            name: "Trae CLI Next",
+            source: "traecli-next",
+            configPath: configPath,
+            configKey: "hooks",
+            format: .nested,
+            events: [
+                ("PreToolUse", 5, false),
+                ("PermissionRequest", 86400, false),
+                ("Stop", 5, false),
+            ],
+            bridgeSourceOverride: "traecli"
+        )
+
+        XCTAssertTrue(ConfigInstaller.installExternalHooks(cli: cli, fm: fm))
+
+        let data = try XCTUnwrap(fm.contents(atPath: configPath))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let hooks = try XCTUnwrap(root["hooks"] as? [String: Any])
+        XCTAssertNil(hooks["beforeReadFile"])
+        XCTAssertNotNil(hooks["PreToolUse"])
+        XCTAssertNotNil(hooks["PermissionRequest"])
+
+        let preToolUse = try XCTUnwrap(hooks["PreToolUse"] as? [[String: Any]])
+        let hookList = try XCTUnwrap(preToolUse.first?["hooks"] as? [[String: Any]])
+        let command = try XCTUnwrap(hookList.first?["command"] as? String)
+        XCTAssertTrue(command.contains("codeisland-bridge --source traecli"))
+        XCTAssertTrue(command.contains("--event PreToolUse"))
+
+        let stopEntries = try XCTUnwrap(hooks["Stop"] as? [[String: Any]])
+        XCTAssertTrue(stopEntries.contains {
+            (($0["hooks"] as? [[String: Any]])?.first?["command"] as? String) == "/usr/local/bin/user-stop"
+        })
+    }
+
+    func testTraeIDEInstallMigratesOldFlatCodeIslandEntry() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let configPath = tempDir.appendingPathComponent("hooks.json").path
+        let old = """
+        {
+          "hooks": {
+            "beforeSubmitPrompt": [
+              {"command": "\(NSHomeDirectory())/.codeisland/codeisland-bridge --source trae --event beforeSubmitPrompt"},
+              {"command": "/usr/local/bin/user-hook"}
+            ]
+          }
+        }
+        """
+        try old.write(toFile: configPath, atomically: true, encoding: .utf8)
+
+        let cli = CLIConfig(
+            name: "Trae",
+            source: "trae",
+            configPath: configPath,
+            configKey: "hooks",
+            format: .traeIDE,
+            events: [("beforeSubmitPrompt", 5, false)]
+        )
+
+        XCTAssertTrue(ConfigInstaller.installExternalHooks(cli: cli, fm: fm))
+
+        let data = try XCTUnwrap(fm.contents(atPath: configPath))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(root["version"] as? Int, 1)
+        let hooks = try XCTUnwrap(root["hooks"] as? [String: Any])
+        let entries = try XCTUnwrap(hooks["beforeSubmitPrompt"] as? [[String: Any]])
+        let codeIslandEntries = entries.filter { entry in
+            if let command = entry["command"] as? String {
+                return command.contains("codeisland-bridge")
+            }
+            if let hookList = entry["hooks"] as? [[String: Any]] {
+                return hookList.contains { ($0["command"] as? String ?? "").contains("codeisland-bridge") }
+            }
+            return false
+        }
+        XCTAssertEqual(codeIslandEntries.count, 1)
+        XCTAssertTrue(entries.contains { ($0["command"] as? String) == "/usr/local/bin/user-hook" })
+    }
+
     // MARK: - Kimi Code CLI TOML hooks
 
     func testRemoveKimiHooksPreservesNonCodeIslandBlocks() {
@@ -209,6 +441,30 @@ final class ConfigInstallerTests: XCTestCase {
         XCTAssertFalse(ConfigInstaller.contentsContainsKimiHook(toml, event: "SessionStart"))
     }
 
+    func testKimiHomePrefersKimiCodeOverLegacy() throws {
+        let fm = FileManager.default
+        let tempHome = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: tempHome, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempHome) }
+
+        // Simulate HOME via NSHomeDirectory is not overridable easily; exercise
+        // path helpers against the real home by checking relative naming only.
+        let modern = ConfigInstaller.kimiCodeHome()
+        let legacy = ConfigInstaller.kimiLegacyHome()
+        XCTAssertTrue(modern.hasSuffix("/.kimi-code"))
+        XCTAssertTrue(legacy.hasSuffix("/.kimi"))
+        XCTAssertNotEqual(modern, legacy)
+
+        // When ~/.kimi-code exists on this machine (kimi-code install), presence
+        // and preferred home must point at the modern root.
+        if fm.fileExists(atPath: modern) {
+            XCTAssertTrue(ConfigInstaller.kimiPresenceDetected())
+            XCTAssertEqual(ConfigInstaller.kimiHome(), modern)
+            XCTAssertTrue(ConfigInstaller.cliExists(source: "kimi"))
+            XCTAssertEqual(ConfigInstaller.displayKimiConfigPath(), "~/.kimi-code/config.toml")
+        }
+    }
+
     func testKimiHookFormatEvents() {
         let events = ConfigInstaller.defaultEvents(for: .kimi)
         let eventNames = events.map { $0.0 }
@@ -227,7 +483,8 @@ final class ConfigInstallerTests: XCTestCase {
         XCTAssertEqual(notificationTimeout, 600, "Kimi max timeout is 600")
     }
 
-    /// Hermetic integration test: uses a temporary directory instead of touching ~/.kimi/config.toml.
+    /// Hermetic integration test: uses a temporary directory instead of touching
+    /// ~/.kimi-code/config.toml (or legacy ~/.kimi/config.toml).
     func testInstallKimiHooksIntegration() throws {
         let fm = FileManager.default
         let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -499,6 +756,140 @@ hooks:
         XCTAssertEqual(cleaned, original)
     }
 
+    // MARK: - Hermes (#226)
+
+    /// Hermes `hooks:` is a MAP of event -> [ {command, timeout} ], not a list.
+    private func hermesHooksMap(_ yaml: String, file: StaticString = #filePath, line: UInt = #line) throws -> [String: [[String: Any]]] {
+        let root = try yamlRootDict(yaml, file: file, line: line)
+        let hooksAny = try XCTUnwrap(root["hooks"], file: file, line: line)
+        guard let map = hooksAny as? [String: Any] else {
+            // Yams may surface a [AnyHashable: Any]
+            if let m = hooksAny as? [AnyHashable: Any] {
+                var out: [String: [[String: Any]]] = [:]
+                for (k, v) in m {
+                    guard let ks = k as? String, let arr = v as? [Any] else { continue }
+                    out[ks] = arr.compactMap { $0 as? [String: Any] }
+                }
+                return out
+            }
+            XCTFail("hooks is not a mapping", file: file, line: line)
+            return [:]
+        }
+        var out: [String: [[String: Any]]] = [:]
+        for (k, v) in map {
+            guard let arr = v as? [Any] else { continue }
+            out[k] = arr.compactMap { $0 as? [String: Any] }
+        }
+        return out
+    }
+
+    func testMergeHermesHooksAppendsMapWhenMissing() throws {
+        let original = "model: hermes-4\n"
+
+        let merged = ConfigInstaller.mergeHermesHooks(into: original)
+
+        // User key preserved.
+        XCTAssertTrue(merged.contains("model: hermes-4"))
+
+        let hooks = try hermesHooksMap(merged)
+        // All five status events registered under snake_case keys.
+        for event in ["pre_tool_call", "post_tool_call", "on_session_start", "on_session_end", "subagent_stop"] {
+            let entries = try XCTUnwrap(hooks[event], "missing event \(event)")
+            let cmd = entries.first?["command"] as? String
+            XCTAssertTrue(cmd?.contains("codeisland-bridge --source hermes") ?? false,
+                          "event \(event) command was \(String(describing: cmd))")
+            // Timeout is a plain int (seconds), <= Hermes max of 300.
+            let timeout = entries.first?["timeout"] as? Int
+            XCTAssertNotNil(timeout)
+            XCTAssertLessThanOrEqual(timeout ?? 999, 300)
+        }
+        // Must NOT use Claude-style settings.json shape (no nested "hooks"/"matcher").
+        XCTAssertFalse(merged.contains("PermissionRequest"))
+        XCTAssertFalse(merged.contains("UserPromptSubmit"))
+    }
+
+    func testMergeHermesHooksIsIdempotent() throws {
+        let once = ConfigInstaller.mergeHermesHooks(into: "")
+        let twice = ConfigInstaller.mergeHermesHooks(into: once)
+        let hooks = try hermesHooksMap(twice)
+        // Re-running must not duplicate our managed entry.
+        let entries = try XCTUnwrap(hooks["pre_tool_call"])
+        let ours = entries.filter { ($0["command"] as? String)?.contains("--source hermes") ?? false }
+        XCTAssertEqual(ours.count, 1)
+    }
+
+    func testMergeHermesHooksPreservesUserHooksAndDropsStaleManaged() throws {
+        let bridge = "\(NSHomeDirectory())/.codeisland/codeisland-bridge"
+        let original = """
+        hooks:
+          pre_tool_call:
+            - command: 'echo user-hook'
+              timeout: 10
+            - command: '\(bridge) --source hermes'
+              timeout: 5
+        hooks_auto_accept: false
+        """
+
+        let merged = ConfigInstaller.mergeHermesHooks(into: original)
+
+        let hooks = try hermesHooksMap(merged)
+        let preTool = try XCTUnwrap(hooks["pre_tool_call"])
+        let commands = preTool.compactMap { $0["command"] as? String }
+        // User hook preserved.
+        XCTAssertTrue(commands.contains("echo user-hook"))
+        // Exactly one of our managed entries (the stale one was replaced, not duplicated).
+        XCTAssertEqual(commands.filter { $0.contains("codeisland-bridge") && $0.contains("--source hermes") }.count, 1)
+        // Sibling user key preserved.
+        XCTAssertEqual(try yamlRootDict(merged)["hooks_auto_accept"] as? Bool, false)
+    }
+
+    func testRemoveManagedHermesHooksDropsOnlyOurEntries() throws {
+        let bridge = "\(NSHomeDirectory())/.codeisland/codeisland-bridge"
+        let original = """
+        hooks:
+          pre_tool_call:
+            - command: 'echo user-hook'
+              timeout: 10
+            - command: '\(bridge) --source hermes'
+              timeout: 5
+          on_session_start:
+            - command: '\(bridge) --source hermes'
+              timeout: 5
+        """
+
+        let cleaned = ConfigInstaller.removeManagedHermesHooks(from: original)
+
+        XCTAssertFalse(cleaned.contains("codeisland-bridge --source hermes"))
+        XCTAssertTrue(cleaned.contains("echo user-hook"))
+        // on_session_start had only our entry — that event key is dropped entirely.
+        let hooks = try? hermesHooksMap(cleaned)
+        XCTAssertNil(hooks?["on_session_start"])
+    }
+
+    func testRemoveManagedHermesHooksLeavesUnrelatedConfigUntouched() {
+        let original = "hooks:\n  pre_tool_call:\n    - command: 'echo user-hook'\n      timeout: 10\n"
+        let cleaned = ConfigInstaller.removeManagedHermesHooks(from: original)
+        // Nothing of ours present -> unchanged.
+        XCTAssertEqual(cleaned, original)
+    }
+
+    func testRemoteInstallerConfigureScriptInstallsHermesAsYaml() {
+        // #226: remote install must write ~/.hermes/config.yaml (YAML), NOT settings.json.
+        let host = RemoteHost(id: "host-1", name: "devbox", host: "example.com")
+        let script = RemoteInstaller.configureRemoteHooksScript(host: host)
+
+        XCTAssertTrue(script.contains("def install_hermes():"))
+        XCTAssertTrue(script.contains(#"hermes_root / "config.yaml""#))
+        XCTAssertTrue(script.contains("HERMES_EVENTS"))
+        XCTAssertTrue(script.contains(#""pre_tool_call""#))
+        XCTAssertTrue(script.contains(#""on_session_start""#))
+        XCTAssertTrue(script.contains("_merge_hermes_hooks"))
+        XCTAssertTrue(script.contains(#""Hermes ok""#))
+        XCTAssertTrue(script.contains("install_hermes()"))
+        // The old Claude-fork settings.json path must be gone.
+        XCTAssertFalse(script.contains(#"hermes_root / "settings.json""#))
+    }
+
     func testRemoteInstallerConfigureScriptDoesNotContainTraecliTypos() {
         let host = RemoteHost(id: "host-1", name: "devbox", host: "example.com")
 
@@ -528,7 +919,8 @@ hooks:
     }
 
     func testRemoteInstallerConfigureScriptInstallsHermes() {
-        // #176: Hermes (a Claude Code fork) must be configured on remote hosts too.
+        // #176/#226: Hermes must be configured on remote hosts via its real YAML
+        // config (~/.hermes/config.yaml), not the old settings.json layout.
         let host = RemoteHost(id: "host-1", name: "devbox", host: "example.com")
 
         let script = RemoteInstaller.configureRemoteHooksScript(host: host)
@@ -934,7 +1326,7 @@ hooks:
 
         let contents = try String(contentsOf: piExtensionPath)
         XCTAssertTrue(contents.contains("CodeIsland pi extension"))
-        XCTAssertTrue(contents.contains("// version: v1"))
+        XCTAssertTrue(contents.contains("// version: v2"))
         XCTAssertTrue(contents.contains("@earendil-works/pi-coding-agent"))
         XCTAssertTrue(ConfigInstaller.isPiExtensionInstalled(piExtensionPath: piExtensionPath.path, fm: fm))
     }
@@ -1015,7 +1407,7 @@ hooks:
 
         let contents = try String(contentsOf: ompExtensionPath)
         XCTAssertTrue(contents.contains("CodeIsland pi extension"))
-        XCTAssertTrue(contents.contains("// version: v1"))
+        XCTAssertTrue(contents.contains("// version: v2"))
         XCTAssertTrue(contents.contains("@oh-my-pi/pi-coding-agent"))
         XCTAssertFalse(contents.contains("@earendil-works/pi-coding-agent"))
         XCTAssertTrue(ConfigInstaller.isOmpExtensionInstalled(ompExtensionPath: ompExtensionPath.path, fm: fm))

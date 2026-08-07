@@ -117,6 +117,7 @@ private struct RemoteHostsPage: View {
     @State private var port = ""
     @State private var identityFile = ""
     @State private var authSocket = ""
+    @State private var cwdFilter = ""
     @State private var autoConnect = false
 
     var body: some View {
@@ -140,6 +141,11 @@ private struct RemoteHostsPage: View {
                 TextField(l10n["remote_identity"], text: $identityFile)
                 TextField(l10n["remote_auth_socket"], text: $authSocket,
                           prompt: Text(l10n["remote_auth_socket_placeholder"]))
+                TextField(l10n["remote_cwd_filter"], text: $cwdFilter,
+                          prompt: Text(l10n["remote_cwd_filter_placeholder"]))
+                Text(l10n["remote_cwd_filter_hint"])
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle(l10n["remote_auto_connect"], isOn: $autoConnect)
 
                 Button(l10n["remote_add_button"]) {
@@ -154,7 +160,8 @@ private struct RemoteHostsPage: View {
                         port: Int(port.trimmingCharacters(in: .whitespacesAndNewlines)),
                         identityFile: identityFile.trimmingCharacters(in: .whitespacesAndNewlines),
                         autoConnect: autoConnect,
-                        authSocket: authSocket.trimmingCharacters(in: .whitespacesAndNewlines)
+                        authSocket: authSocket.trimmingCharacters(in: .whitespacesAndNewlines),
+                        cwdFilter: cwdFilter.trimmingCharacters(in: .whitespacesAndNewlines)
                     ))
 
                     name = ""
@@ -163,6 +170,7 @@ private struct RemoteHostsPage: View {
                     port = ""
                     identityFile = ""
                     authSocket = ""
+                    cwdFilter = ""
                     autoConnect = false
                 }
                 .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -183,6 +191,8 @@ private struct RemoteHostRow: View {
     @ObservedObject private var l10n = L10n.shared
     @ObservedObject private var remoteManager = RemoteManager.shared
     let host: RemoteHost
+
+    @State private var cwdFilterDraft = ""
 
     private var status: SSHForwarder.Status {
         remoteManager.connectionStatus[host.id] ?? .disconnected
@@ -228,6 +238,15 @@ private struct RemoteHostRow: View {
                     .lineLimit(2)
             }
 
+            // Editable per-host session scope (#240) — saved on submit / focus loss.
+            TextField(l10n["remote_cwd_filter"], text: $cwdFilterDraft,
+                      prompt: Text(l10n["remote_cwd_filter_placeholder"]))
+                .font(.system(size: 11, design: .monospaced))
+                .textFieldStyle(.roundedBorder)
+                .onAppear { cwdFilterDraft = host.cwdFilter }
+                .onChange(of: host.cwdFilter) { _, newValue in cwdFilterDraft = newValue }
+                .onSubmit { saveCwdFilter() }
+
             HStack(spacing: 8) {
                 switch status {
                 case .connected, .connecting:
@@ -253,6 +272,14 @@ private struct RemoteHostRow: View {
             .buttonStyle(.bordered)
         }
         .padding(.vertical, 4)
+    }
+
+    private func saveCwdFilter() {
+        let trimmed = cwdFilterDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != host.cwdFilter else { return }
+        var updated = host
+        updated.cwdFilter = trimmed
+        remoteManager.updateHost(updated)
     }
 }
 
@@ -291,6 +318,7 @@ private struct GeneralPage: View {
     @ObservedObject private var l10n = L10n.shared
     @AppStorage(SettingsKey.displayChoice) private var displayChoice = SettingsDefaults.displayChoice
     @AppStorage(SettingsKey.allowHorizontalDrag) private var allowHorizontalDrag = SettingsDefaults.allowHorizontalDrag
+    @AppStorage(SettingsKey.avoidMenuBarIcons) private var avoidMenuBarIcons = SettingsDefaults.avoidMenuBarIcons
     @State private var launchAtLogin: Bool
     @State private var launchAtLoginError: LoginItemManagerError?
 
@@ -305,7 +333,9 @@ private struct GeneralPage: View {
                 Picker(l10n["language"], selection: $l10n.language) {
                     Text(l10n["system_language"]).tag("system")
                     Text("English").tag("en")
-                    Text("中文").tag("zh")
+                    Text("简体中文").tag("zh")
+                    Text("繁體中文").tag("zh-Hant")
+                    Text("Deutsch").tag("de")
                     Text("日本語").tag("ja")
                     Text("한국어").tag("ko")
                     Text("Türkçe").tag("tr")
@@ -330,6 +360,10 @@ private struct GeneralPage: View {
                         }
                     }
                 Text(l10n["allow_horizontal_drag_desc"])
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle(l10n["avoid_menu_bar_icons"], isOn: $avoidMenuBarIcons)
+                Text(l10n["avoid_menu_bar_icons_desc"])
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Picker(l10n["display"], selection: $displayChoice) {
@@ -380,7 +414,9 @@ private struct BehaviorPage: View {
     @AppStorage(SettingsKey.smartSuppress) private var smartSuppress = SettingsDefaults.smartSuppress
     @AppStorage(SettingsKey.collapseOnMouseLeave) private var collapseOnMouseLeave = SettingsDefaults.collapseOnMouseLeave
     @AppStorage(SettingsKey.autoCollapseAfterSessionJump) private var autoCollapseAfterSessionJump = SettingsDefaults.autoCollapseAfterSessionJump
-    @AppStorage(SettingsKey.autoExpandOnCompletion) private var autoExpandOnCompletion = SettingsDefaults.autoExpandOnCompletion
+    // Seeded through the migration shim so a legacy autoExpandOnCompletion=false
+    // shows up as "off" here; writes go to the new key via onChange.
+    @State private var completionStyle: String = AppState.completionStyle().rawValue
     @AppStorage(SettingsKey.pluginSessionMode) private var pluginSessionMode = SettingsDefaults.pluginSessionMode
     @AppStorage(SettingsKey.hapticOnHover) private var hapticOnHover = SettingsDefaults.hapticOnHover
     @AppStorage(SettingsKey.hapticIntensity) private var hapticIntensity = SettingsDefaults.hapticIntensity
@@ -389,6 +425,7 @@ private struct BehaviorPage: View {
     @AppStorage(SettingsKey.maxToolHistory) private var maxToolHistory = SettingsDefaults.maxToolHistory
     @AppStorage(SettingsKey.autoApproveTools) private var autoApproveRaw: String = SettingsDefaults.autoApproveTools
     @AppStorage(SettingsKey.excludedHookCwdSubstrings) private var excludedHookCwdSubstrings: String = SettingsDefaults.excludedHookCwdSubstrings
+    @AppStorage(SettingsKey.claudeConfigDir) private var claudeConfigDir: String = SettingsDefaults.claudeConfigDir
     @AppStorage(SettingsKey.webhookEnabled) private var webhookEnabled: Bool = SettingsDefaults.webhookEnabled
     @AppStorage(SettingsKey.webhookURL) private var webhookURL: String = SettingsDefaults.webhookURL
     @AppStorage(SettingsKey.webhookEventFilter) private var webhookEventFilter: String = SettingsDefaults.webhookEventFilter
@@ -448,12 +485,19 @@ private struct BehaviorPage: View {
                     isOn: $autoCollapseAfterSessionJump,
                     animation: .clickJumpCollapse
                 )
-                BehaviorToggleRow(
-                    title: l10n["auto_expand_on_completion"],
-                    desc: l10n["auto_expand_on_completion_desc"],
-                    isOn: $autoExpandOnCompletion,
-                    animation: .smartSuppress
-                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Picker(l10n["completion_notification"], selection: $completionStyle) {
+                        Text(l10n["completion_style_expand"]).tag(AppState.CompletionStyle.expand.rawValue)
+                        Text(l10n["completion_style_glance"]).tag(AppState.CompletionStyle.glance.rawValue)
+                        Text(l10n["completion_style_off"]).tag(AppState.CompletionStyle.off.rawValue)
+                    }
+                    .onChange(of: completionStyle) { _, newValue in
+                        UserDefaults.standard.set(newValue, forKey: SettingsKey.completionNotificationStyle)
+                    }
+                    Text(l10n["completion_notification_desc"])
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
                 BehaviorToggleRow(
                     title: l10n["haptic_on_hover"],
                     desc: l10n["haptic_on_hover_desc"],
@@ -488,6 +532,19 @@ private struct BehaviorPage: View {
                         }
                     }
                 }
+            }
+
+            Section(l10n["claude_config_dir_title"]) {
+                Text(l10n["claude_config_dir_desc"])
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField(l10n["claude_config_dir_placeholder"], text: $claudeConfigDir)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                Text(String(format: l10n["claude_config_dir_resolved"],
+                            ClaudeConfigPaths.displayPath(ClaudeConfigPaths.configDir())))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
             }
 
             Section(l10n["excluded_hook_cwd_title"]) {
@@ -818,6 +875,7 @@ private struct AppearancePage: View {
     @AppStorage(SettingsKey.aiMessageLines) private var aiMessageLines = SettingsDefaults.aiMessageLines
     @AppStorage(SettingsKey.showAgentDetails) private var showAgentDetails = SettingsDefaults.showAgentDetails
     @AppStorage(SettingsKey.showToolStatus) private var showToolStatus = SettingsDefaults.showToolStatus
+    @AppStorage(SettingsKey.showGitBranch) private var showGitBranch = SettingsDefaults.showGitBranch
     @AppStorage(SettingsKey.collapsedWidthScale) private var collapsedWidthScale = SettingsDefaults.collapsedWidthScale
     @AppStorage(SettingsKey.notchHeightMode) private var notchHeightModeRaw = SettingsDefaults.notchHeightMode
     @AppStorage(SettingsKey.customNotchHeight) private var customNotchHeight = SettingsDefaults.customNotchHeight
@@ -861,7 +919,7 @@ private struct AppearancePage: View {
                     Slider(value: Binding(
                         get: { Double(collapsedWidthScale) },
                         set: { collapsedWidthScale = Int($0) }
-                    ), in: 50...150, step: 10)
+                    ), in: Double(NotchWidthScale.min)...Double(NotchWidthScale.max), step: Double(NotchWidthScale.step))
                     Text(l10n["collapsed_width_scale_desc"])
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -905,6 +963,12 @@ private struct AppearancePage: View {
                 }
                 Toggle(l10n["show_agent_details"], isOn: $showAgentDetails)
                 Toggle(l10n["show_tool_status"], isOn: $showToolStatus)
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle(l10n["show_git_branch"], isOn: $showGitBranch)
+                    Text(l10n["show_git_branch_desc"])
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
                 UsagePricingOverrideEditor()
             }
         }
@@ -1051,6 +1115,7 @@ private struct MascotsPage: View {
         ("TraeCNBot", "traecn", "Trae CN", Color(red: 0.96, green: 0.31, blue: 0.0)),
         ("CopilotBot", "copilot", "GitHub Copilot", Color(red: 0.35, green: 0.75, blue: 0.95)),
         ("QoderBot", "qoder", "Qoder", Color(red: 0.165, green: 0.859, blue: 0.361)),
+        ("QoderBot", "qoderwork", "QoderWork", Color(red: 0.165, green: 0.859, blue: 0.361)),
         ("Droid", "droid", "Factory", Color(red: 0.835, green: 0.416, blue: 0.149)),
         ("Buddy", "codebuddy", "CodeBuddy", Color(red: 0.424, green: 0.302, blue: 1.0)),
         ("BuddyCN", "codybuddycn", "CodyBuddyCN", Color(red: 0.424, green: 0.302, blue: 1.0)),
@@ -1058,10 +1123,15 @@ private struct MascotsPage: View {
         ("AntiGravity", "antigravity", "AntiGravity", Color(red: 0.424, green: 0.302, blue: 1.0)),
         ("WorkBuddy", "workbuddy", "WorkBuddy", Color(red: 0.475, green: 0.380, blue: 0.870)),
         ("Hermes", "hermes", "Hermes", Color(red: 0.424, green: 0.302, blue: 1.0)),
+        ("Molty", "openclaw", "OpenClaw", Color(red: 0.93, green: 0.36, blue: 0.24)),
         ("QwenBot", "qwen", "Qwen Code", Color(red: 0.486, green: 0.228, blue: 0.929)),
         ("KimiBot", "kimi", "Kimi Code CLI", Color(red: 0.29, green: 0.56, blue: 1.0)),
+        ("Kiro", "kiro", "Kiro", Color(red: 0.62, green: 0.45, blue: 1.0)),
+        ("Pi", "pi", "Pi", Color(red: 0.55, green: 0.43, blue: 0.95)),
+        ("Oh My Pi", "omp", "Oh My Pi", Color(red: 0.55, green: 0.43, blue: 0.95)),
         ("OpBot", "opencode", "OpenCode", Color(red: 0.55, green: 0.55, blue: 0.57)),
         ("ClineBot", "cline", "Cline", Color(red: 0.00, green: 0.70, blue: 0.49)),
+        ("Gemini", "google-antigravity", "Google Antigravity", Color(red: 0.278, green: 0.588, blue: 0.894)),
     ]
 
     var body: some View {
@@ -1166,6 +1236,27 @@ private struct SoundPage: View {
     @AppStorage(SettingsKey.soundApprovalNeeded) private var soundApprovalNeeded = SettingsDefaults.soundApprovalNeeded
     @AppStorage(SettingsKey.soundPromptSubmit) private var soundPromptSubmit = SettingsDefaults.soundPromptSubmit
     @AppStorage(SettingsKey.soundBoot) private var soundBoot = SettingsDefaults.soundBoot
+    @AppStorage(SettingsKey.quietHoursEnabled) private var quietHoursEnabled = SettingsDefaults.quietHoursEnabled
+    @AppStorage(SettingsKey.quietHoursStart) private var quietHoursStart = SettingsDefaults.quietHoursStart
+    @AppStorage(SettingsKey.quietHoursEnd) private var quietHoursEnd = SettingsDefaults.quietHoursEnd
+
+    /// DatePicker works in wall-clock Dates; storage is minutes since midnight.
+    private func timeBinding(_ minutes: Binding<Int>) -> Binding<Date> {
+        Binding<Date>(
+            get: {
+                Calendar.current.date(
+                    bySettingHour: minutes.wrappedValue / 60,
+                    minute: minutes.wrappedValue % 60,
+                    second: 0,
+                    of: Date()
+                ) ?? Date()
+            },
+            set: { date in
+                let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+                minutes.wrappedValue = (c.hour ?? 0) * 60 + (c.minute ?? 0)
+            }
+        )
+    }
 
     var body: some View {
         Form {
@@ -1210,6 +1301,30 @@ private struct SoundPage: View {
 
                 Section(l10n["system_section"]) {
                     SoundEventRow(title: l10n["boot_sound"], subtitle: l10n["boot_sound_desc"], soundName: "8bit_boot", isOn: $soundBoot)
+                }
+
+                Section {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Toggle(l10n["quiet_hours"], isOn: $quietHoursEnabled)
+                        Text(l10n["quiet_hours_desc"])
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+                    if quietHoursEnabled {
+                        HStack(spacing: 16) {
+                            DatePicker(
+                                l10n["quiet_hours_start"],
+                                selection: timeBinding($quietHoursStart),
+                                displayedComponents: .hourAndMinute
+                            )
+                            DatePicker(
+                                l10n["quiet_hours_end"],
+                                selection: timeBinding($quietHoursEnd),
+                                displayedComponents: .hourAndMinute
+                            )
+                        }
+                        .datePickerStyle(.field)
+                    }
                 }
             }
         }
@@ -1309,6 +1424,9 @@ private struct BuddyPage: View {
     @AppStorage(SettingsKey.esp32HeartbeatSeconds) private var heartbeat: Double = SettingsDefaults.esp32HeartbeatSeconds
     @AppStorage(SettingsKey.buddyScreenBrightnessPercent) private var brightness: Double = SettingsDefaults.buddyScreenBrightnessPercent
     @AppStorage(SettingsKey.buddyScreenOrientation) private var screenOrientation: String = SettingsDefaults.buddyScreenOrientation
+    @AppStorage(SettingsKey.appleCompanionEnabled) private var appleCompanionEnabled: Bool = SettingsDefaults.appleCompanionEnabled
+    @AppStorage(SettingsKey.appleCompanionHeartbeatSeconds) private var appleCompanionHeartbeat: Double = SettingsDefaults.appleCompanionHeartbeatSeconds
+    @ObservedObject private var appleCompanion = AppleCompanionPublisher.shared
     @State private var refreshTick = 0
 
     private var bridge: ESP32BridgeManager { ESP32BridgeManager.shared }
@@ -1361,6 +1479,13 @@ private struct BuddyPage: View {
             heartbeatSeconds: heartbeat,
             brightnessPercent: brightness,
             screenOrientation: BuddyScreenOrientation(settingsValue: screenOrientation)
+        )
+    }
+
+    private func configureAppleCompanion() {
+        AppleCompanionPublisher.shared.configure(
+            enabled: appleCompanionEnabled,
+            heartbeatSeconds: appleCompanionHeartbeat
         )
     }
 
@@ -1547,6 +1672,67 @@ private struct BuddyPage: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section(l10n["apple_companion"]) {
+                Toggle(l10n["apple_companion_enable"], isOn: $appleCompanionEnabled)
+                    .onChange(of: appleCompanionEnabled) { _, _ in
+                        configureAppleCompanion()
+                    }
+
+                HStack {
+                    Text(l10n["apple_companion_status"])
+                    Spacer()
+                    Circle()
+                        .fill(appleCompanionStatusColor)
+                        .frame(width: 8, height: 8)
+                    Text(appleCompanionStatusText)
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                        .lineLimit(1)
+                }
+
+                if appleCompanion.connectedPeerNames.isEmpty {
+                    Label(l10n["apple_companion_no_devices"], systemImage: "iphone")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(appleCompanion.connectedPeerNames, id: \.self) { name in
+                        Label(name, systemImage: "iphone")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                HStack {
+                    Text(l10n["apple_companion_sync_interval"])
+                    Spacer()
+                    Text(String(format: l10n["buddy_seconds_format"], appleCompanionHeartbeat))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Slider(value: $appleCompanionHeartbeat, in: 1...30, step: 1)
+                    .onChange(of: appleCompanionHeartbeat) { _, _ in
+                        configureAppleCompanion()
+                    }
+                    .disabled(!appleCompanionEnabled)
+
+                Button {
+                    appleCompanion.reconnect()
+                } label: {
+                    Label(l10n["apple_companion_restart"], systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(!appleCompanionEnabled)
+
+                if let error = appleCompanion.lastError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                Text(l10n["apple_companion_desc"])
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 Text(l10n["buddy_desc"])
                     .font(.caption)
@@ -1581,6 +1767,20 @@ private struct BuddyPage: View {
         case ..<(-70): return "wifi"
         default:       return "wifi"
         }
+    }
+
+    private var appleCompanionStatusText: String {
+        guard appleCompanion.enabled else {
+            return l10n["apple_companion_status_off"]
+        }
+        return appleCompanion.connectedPeerNames.isEmpty
+            ? l10n["apple_companion_status_waiting"]
+            : l10n["apple_companion_status_connected"]
+    }
+
+    private var appleCompanionStatusColor: Color {
+        guard appleCompanion.enabled else { return .secondary }
+        return appleCompanion.connectedPeerNames.isEmpty ? .orange : .green
     }
 }
 

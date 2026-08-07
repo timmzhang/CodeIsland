@@ -198,8 +198,9 @@ enum DebugHarness {
         s1.lastUserPrompt = "Build the dashboard page"
         s1.addRecentMessage(ChatMessage(isUser: true, text: "Build the dashboard page"))
         s1.termApp = "Ghostty"
+        s1.gitBranch = "main"
 
-        // Session 2: Codex idle
+        // Session 2: Codex idle, on a linked worktree branch
         var s2 = SessionSnapshot()
         s2.status = .idle
         s2.cwd = "/Users/dev/backend"
@@ -209,14 +210,17 @@ enum DebugHarness {
         s2.lastAssistantMessage = "Refactored the query planner to use a cost-based optimizer."
         s2.addRecentMessage(ChatMessage(isUser: true, text: "Optimize the query planner"))
         s2.addRecentMessage(ChatMessage(isUser: false, text: "Refactored the query planner."))
+        s2.gitBranch = "feat/query-planner"
+        s2.gitIsWorktree = true
 
-        // Session 3: Cursor processing
+        // Session 3: Cursor blocked on an in-IDE question (#265 display-only wait)
         var s3 = SessionSnapshot()
-        s3.status = .processing
+        s3.status = .waitingQuestion
         s3.cwd = "/Users/dev/mobile"
         s3.source = "cursor"
         s3.lastUserPrompt = "Fix the scroll jank"
         s3.addRecentMessage(ChatMessage(isUser: true, text: "Fix the scroll jank"))
+        s3.cursorPendingQuestion = "Which list component should I optimize first? (+1)"
 
         state.sessions["preview-multi-1"] = s1
         state.sessions["preview-multi-2"] = s2

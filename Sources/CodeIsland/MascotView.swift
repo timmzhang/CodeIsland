@@ -1,5 +1,4 @@
 import SwiftUI
-import CodeIslandCore
 
 // MARK: - Mascot Animation Speed Environment
 
@@ -17,24 +16,26 @@ extension EnvironmentValues {
 /// Routes a CLI source identifier to the correct pixel mascot view.
 struct MascotView: View {
     let source: String
-    let status: AgentStatus
+    let status: MascotAgentStatus
     var size: CGFloat = 27
     @AppStorage(SettingsKey.mascotSpeed) private var speedPct = SettingsDefaults.mascotSpeed
+    @ObservedObject private var animationGate = MascotAnimationGate.shared
 
     var body: some View {
         Group {
             switch source {
             case "codex":
                 DexView(status: status, size: size)
-            case "gemini":
+            case "gemini", "google-antigravity":
+                // Google Antigravity is Gemini-based — reuse the Gemini mascot.
                 GeminiView(status: status, size: size)
-            case "cursor":
+            case "cursor", "cursor-cli":
                 CursorView(status: status, size: size)
             case "trae", "traecn", "traecli":
                 TraeView(status: status, size: size)
             case "copilot":
                 CopilotView(status: status, size: size)
-            case "qoder":
+            case "qoder", "qoder-cli", "qoderwork":
                 QoderView(status: status, size: size)
             case "droid":
                 DroidView(status: status, size: size)
@@ -54,8 +55,14 @@ struct MascotView: View {
                 WorkBuddyView(status: status, size: size)
             case "hermes":
                 HermesView(status: status, size: size)
+            case "openclaw":
+                OpenClawView(status: status, size: size)
+            case "kiro":
+                KiroView(status: status, size: size)
             case "kimi":
                 KimiView(status: status, size: size)
+            case "pi", "omp":
+                PiView(status: status, size: size)
             case "cline":
                 ClineView(status: status, size: size)
             default:
@@ -63,5 +70,7 @@ struct MascotView: View {
             }
         }
         .environment(\.mascotSpeed, Double(speedPct) / 100.0)
+        .environment(\.mascotAnimationsActive, animationGate.animationsActive)
+        .environment(\.mascotAnimationEpoch, animationGate.epoch)
     }
 }

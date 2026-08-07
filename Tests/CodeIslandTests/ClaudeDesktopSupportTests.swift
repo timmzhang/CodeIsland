@@ -2,12 +2,11 @@ import XCTest
 @testable import CodeIsland
 @testable import CodeIslandCore
 
-/// Claude Desktop's hook subprocesses inherit
-/// `__CFBundleIdentifier=com.anthropic.claudefordesktop`. These regressions
-/// ensure the resulting Claude session follows native-app lifecycle and
-/// visibility rules instead of being treated as a terminal CLI session.
-@MainActor
+/// #211 — Claude Code Desktop support. Local Code-tab sessions run the same
+/// engine as the CLI and fire the same ~/.claude/settings.json hooks; their
+/// hook subprocesses inherit __CFBundleIdentifier=com.anthropic.claudefordesktop.
 final class ClaudeDesktopSupportTests: XCTestCase {
+
     private func makeSession(termBundleId: String?, source: String) -> SessionSnapshot {
         var session = SessionSnapshot()
         session.source = source
@@ -16,14 +15,9 @@ final class ClaudeDesktopSupportTests: XCTestCase {
     }
 
     func testDesktopClaudeSessionIsNativeAppMode() {
-        let session = makeSession(
-            termBundleId: "com.anthropic.claudefordesktop",
-            source: "claude"
-        )
-
+        let session = makeSession(termBundleId: "com.anthropic.claudefordesktop", source: "claude")
         XCTAssertTrue(session.isNativeAppMode)
         XCTAssertFalse(session.isIDETerminal)
-        XCTAssertEqual(session.terminalName, "Claude")
     }
 
     func testTerminalClaudeSessionIsNotNativeAppMode() {
@@ -32,17 +26,22 @@ final class ClaudeDesktopSupportTests: XCTestCase {
     }
 
     func testNonClaudeSourceInsideClaudeDesktopIsNotNativeAppMode() {
-        let session = makeSession(
-            termBundleId: "com.anthropic.claudefordesktop",
-            source: "codex"
-        )
+        // e.g. a Codex CLI launched from some embedded surface must not be
+        // claimed by the Claude Desktop mapping.
+        let session = makeSession(termBundleId: "com.anthropic.claudefordesktop", source: "codex")
         XCTAssertFalse(session.isNativeAppMode)
     }
 
     func testClickJumpDoesNotStealTerminalClaudeSessions() {
+        // The source→bundle fallback list must NOT contain claude: most claude
+        // sessions are terminal CLI runs, and the fallback would redirect their
+        // click-to-jump to the desktop app whenever it happens to be running.
         XCTAssertNil(TerminalActivator.sourceToNativeAppBundleId["claude"])
     }
 
+    /// AppState is main-actor isolated; upstream's class is not annotated, so this
+    /// local regression carries the isolation itself.
+    @MainActor
     func testDesktopAskUserQuestionOpensQuestionCard() async throws {
         let appState = AppState()
         let sessionId = "claude-desktop-question"

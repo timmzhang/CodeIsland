@@ -82,7 +82,7 @@ class HookServer {
         receiveAll(connection: connection, accumulated: Data())
     }
 
-    private static let maxPayloadSize = 1_048_576  // 1MB safety limit
+    private static let maxPayloadSize = 10_485_760  // 10MB safety limit
 
     /// Recursively receive all data until EOF, then process
     private func receiveAll(connection: NWConnection, accumulated: Data) {
@@ -102,7 +102,8 @@ class HookServer {
                 // Safety: reject oversized payloads
                 if data.count > Self.maxPayloadSize {
                     log.warning("Payload too large (\(data.count) bytes), dropping connection")
-                    connection.cancel()
+                    let denyResponse = Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8)
+                    self.sendResponse(connection: connection, data: denyResponse)
                     return
                 }
 
@@ -137,6 +138,60 @@ class HookServer {
             if !pattern.isEmpty, cwd.contains(pattern) { return true }
         }
         return false
+    }
+
+    /// Per-host cwd ALLOW-list for remote sessions (#240) — on shared remote
+    /// accounts, users can scope the panel to their own project directories.
+    /// Empty filter = allow everything (previous behavior). With a filter set,
+    /// events must carry a cwd containing one of the entries; events without a
+    /// cwd are dropped too — on a shared account they can't be attributed.
+    nonisolated static func remoteEventPassesCwdFilter(
+        cwd: String?,
+        workspaceRoots: [String]? = nil,
+        filterCSV: String
+    ) -> Bool {
+        let hasPattern = filterCSV
+            .split(separator: ",", omittingEmptySubsequences: false)
+            .contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard hasPattern else { return true }
+        if let cwd, !cwd.isEmpty, cwdMatchesAnyPattern(cwd, patternsCSV: filterCSV) {
+            return true
+        }
+        if let roots = workspaceRoots {
+            for root in roots where !root.isEmpty {
+                if cwdMatchesAnyPattern(root, patternsCSV: filterCSV) {
+                    return true
+                }
+            }
+        }
+        // No cwd or workspace root matched — on a shared account they can't be attributed.
+        return false
+    }
+
+    /// Remote cwd allow-lists drop hooks from other users' directories on shared
+    /// SSH accounts (#240). Lifecycle and blocking hooks for sessions we already
+    /// track must still flow through — otherwise SessionEnd/Stop never tears
+    /// sessions down and PermissionRequest/Notification stall the remote agent.
+    nonisolated static func remoteEventBypassesCwdFilter(
+        eventName: String,
+        sessionId: String?,
+        trackedSessionIds: Set<String>
+    ) -> Bool {
+        guard let sessionId, trackedSessionIds.contains(sessionId) else { return false }
+        switch EventNormalizer.normalize(eventName) {
+        case "SessionEnd", "Stop", "SubagentStop", "PermissionRequest", "Notification", "AfterAgentResponse":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Looks up the configured cwd filter for a remote host id. Nil when the
+    /// event is not remote or the host is no longer configured.
+    private static func remoteCwdFilter(for event: HookEvent) -> String? {
+        guard let hostId = event.rawJSON["_remote_host_id"] as? String,
+              !hostId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return RemoteManager.shared.hosts.first(where: { $0.id == hostId })?.cwdFilter
     }
 
     /// Fire-and-forget POST of the hook event to a user-configured webhook URL.
@@ -232,7 +287,12 @@ class HookServer {
 
     static func routeKind(for event: HookEvent) -> RouteKind {
         let normalizedEventName = EventNormalizer.normalize(event.eventName)
-        if normalizedEventName == "PermissionRequest" {
+        let source = event.rawJSON["_source"] as? String
+        let normalizedSource = SessionSnapshot.normalizedSupportedSource(source)
+        let isGeminiBasedSource = normalizedSource == "google-antigravity" || normalizedSource == "gemini"
+        // Gemini CLI and Google Antigravity send their blocking approval as PreToolUse.
+        // Route those source-tagged events through the same permission UI path.
+        if normalizedEventName == "PermissionRequest" || (isGeminiBasedSource && normalizedEventName == "PreToolUse") {
             return .permission
         }
         if normalizedEventName == "Notification", QuestionPayload.from(event: event) != nil {
@@ -252,6 +312,8 @@ class HookServer {
     private static let pluginMarkerBytes = Data("_via_plugin".utf8)
     private static let sourceMarkerBytes = Data(#""_source""#.utf8)
     private static let codexMarkerBytes = Data("codex".utf8)
+    private static let cursorTranscriptMarkerBytes = Data("agent-transcripts".utf8)
+    private static let cursorSourceMarkerBytes = Data("cursor".utf8)
 
     private static func codexSubagentMetadata(from raw: [String: Any]) -> CodexSubagentMetadata? {
         guard let path = nonEmptyString(raw["transcript_path"]) else { return nil }
@@ -286,15 +348,44 @@ class HookServer {
     }
 
     private func routeSubsessionPayloadIfNeeded(data: Data) -> (processedData: Data, responseData: Data?) {
-        let mayNeedRouting = data.range(of: Self.pluginMarkerBytes) != nil
+        let mayNeedPluginOrCodex = data.range(of: Self.pluginMarkerBytes) != nil
             || (data.range(of: Self.sourceMarkerBytes) != nil && data.range(of: Self.codexMarkerBytes) != nil)
-        guard mayNeedRouting,
+        let mayNeedCursor = data.range(of: Self.cursorTranscriptMarkerBytes) != nil
+            && data.range(of: Self.cursorSourceMarkerBytes) != nil
+
+        let mode = UserDefaults.standard.string(forKey: SettingsKey.pluginSessionMode)
+            ?? SettingsDefaults.pluginSessionMode
+
+        // Cursor Task routing is a no-op in separate mode; skip JSON parse when
+        // the payload is Cursor-only (Codex/plugin may still need it below).
+        if mayNeedCursor && !mayNeedPluginOrCodex && mode != "hide" && mode != "merge" {
+            return (data, nil)
+        }
+
+        guard mayNeedPluginOrCodex || mayNeedCursor,
               let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return (data, nil)
         }
 
-        let mode = UserDefaults.standard.string(forKey: SettingsKey.pluginSessionMode)
-            ?? SettingsDefaults.pluginSessionMode
+        // Cursor Task/subagent: apply Agent Sub-Sessions (separate / merge / hide).
+        switch CursorSubsessionRouter.decide(raw: raw, mode: mode) {
+        case .leave:
+            break
+        case .hide:
+            return (data, Self.hiddenPluginResponse(for: raw))
+        case .merge(let parentSessionId, let childSessionId):
+            var rewritten = raw
+            CursorSubsessionRouter.applyMerge(
+                to: &rewritten,
+                parentSessionId: parentSessionId,
+                childSessionId: childSessionId
+            )
+            if let newData = try? JSONSerialization.data(withJSONObject: rewritten) {
+                return (newData, nil)
+            }
+            return (data, nil)
+        }
+
         guard mode == "hide" || mode == "merge" else {
             return (data, nil)
         }
@@ -354,13 +445,11 @@ class HookServer {
     }
 
     private func processRequest(data: Data, connection: NWConnection) {
-        // Sub-session mode pre-filter (#123, #151): events that arrived through a
-        // plugin proxy (`_via_plugin`) or from a Codex native subagent can be
-        // merged into the matching main session, hidden, or kept separate per
-        // the user's setting. "separate" preserves prior behavior.
+        // Sub-session pre-filter (#123, #151): plugin, Codex, or Cursor Task hooks
+        // (Cursor: transcript parent ≠ session_id) follow Agent Sub-Sessions —
+        // merge into the parent, hide, or keep separate.
         //
-        // Cheap byte probes first — JSONSerialization on every PostToolUse on
-        // the main thread is not free.
+        // Cheap byte probes first; avoid JSONSerialization on every PostToolUse.
         let routed = routeSubsessionPayloadIfNeeded(data: data)
         if let responseData = routed.responseData {
             sendResponse(connection: connection, data: responseData)
@@ -415,6 +504,24 @@ class HookServer {
         if let cwd = event.rawJSON["cwd"] as? String,
            !cwd.isEmpty,
            Self.eventMatchesExcludedCwd(cwd) {
+            sendResponse(connection: connection, data: Data("{}".utf8))
+            return
+        }
+
+        // Per-host cwd allow-list for remote sessions (#240): on a shared remote
+        // account every user's hooks reach every connected client — scope this
+        // panel to the configured working directories and drop the rest.
+        if let filterCSV = Self.remoteCwdFilter(for: event),
+           !Self.remoteEventPassesCwdFilter(
+               cwd: event.rawJSON["cwd"] as? String,
+               workspaceRoots: event.rawJSON["workspace_roots"] as? [String],
+               filterCSV: filterCSV
+           ),
+           !Self.remoteEventBypassesCwdFilter(
+               eventName: event.eventName,
+               sessionId: event.sessionId,
+               trackedSessionIds: Set(appState.sessions.keys)
+           ) {
             sendResponse(connection: connection, data: Data("{}".utf8))
             return
         }

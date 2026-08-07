@@ -95,6 +95,20 @@ final class CodexAppServerClientTests: XCTestCase {
         XCTAssertNil(CodexAppServerClient.parseMessage(data))
     }
 
+    /// Codex surfaces plan-mode prompts as a server->client *request* (has an id),
+    /// not a notification. It must classify as `.request` so AppState can answer it. (#209)
+    func testParseMessageClassifiesRequestUserInput() {
+        let data = Data(#"{"jsonrpc":"2.0","id":"r-1","method":"item/tool/requestUserInput","params":{"threadId":"t-1","turnId":"u-1","itemId":"i-1","questions":[{"id":"q1","header":"Plan","question":"Pick","isOther":false,"isSecret":false,"options":[{"label":"A","description":"d"}]}]}}"#.utf8)
+        let msg = CodexAppServerClient.parseMessage(data)
+        XCTAssertEqual(msg?.kind, .request(method: "item/tool/requestUserInput", id: .string("r-1")))
+        let questions = msg?.raw["params"]?.asObject?["questions"]
+        if case .array(let arr)? = questions {
+            XCTAssertEqual(arr.first?.asObject?["id"]?.asString, "q1")
+        } else {
+            XCTFail("expected questions array")
+        }
+    }
+
     func testParseMessagePreservesRawParams() {
         let data = Data(#"{"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"t-1","preview":"hi"}}}"#.utf8)
         let msg = CodexAppServerClient.parseMessage(data)
@@ -138,5 +152,43 @@ final class CodexAppServerClientTests: XCTestCase {
             XCTFail("expected array for k3")
         }
         XCTAssertEqual(dict?["k4"]?.asObject?["inner"]?.asBool, true)
+    }
+
+    // MARK: - Process lifecycle (sandboxed subprocess)
+
+    /// When the spawned server exits, its stdout/stderr pipes hit EOF. A
+    /// readabilityHandler left installed on an EOF'd pipe is re-invoked in a
+    /// tight loop by the underlying dispatch source, pinning a CPU core
+    /// forever (#278 class of bug). Spawn a process that exits immediately and
+    /// assert both handlers are disarmed once EOF is observed.
+    func testProcessExitDisarmsReadabilityHandlers() throws {
+        let client = CodexAppServerClient(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "exit 0"]
+        )
+        let exited = expectation(description: "onExit fired")
+        client.onExit = { _ in exited.fulfill() }
+
+        try client.start()
+        let stdoutHandle = try XCTUnwrap(client.currentStdoutPipe).fileHandleForReading
+        let stderrHandle = try XCTUnwrap(client.currentStderrPipe).fileHandleForReading
+        wait(for: [exited], timeout: 5)
+
+        // The EOF callbacks race the termination notification — poll briefly.
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline,
+              stdoutHandle.readabilityHandler != nil || stderrHandle.readabilityHandler != nil {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        XCTAssertNil(
+            stdoutHandle.readabilityHandler,
+            "stdout readabilityHandler still installed after EOF — its dispatch source respins forever at 100% CPU"
+        )
+        XCTAssertNil(
+            stderrHandle.readabilityHandler,
+            "stderr readabilityHandler still installed after EOF — its dispatch source respins forever at 100% CPU"
+        )
+        client.stop()
     }
 }

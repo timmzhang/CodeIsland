@@ -124,6 +124,8 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         parent.toolDescription = "Hypatia"
         parent.cwd = "/repo"
         parent.model = "gpt-test"
+        parent.remoteHostId = "test-remote"
+        parent.remoteHostName = "Test Remote"
         var subagent = SubagentState(agentId: "child-thread", agentType: "worker")
         subagent.currentTool = "sleep"
         subagent.toolDescription = "sleep 45"
@@ -138,6 +140,8 @@ final class AppStateCodexSubsessionTests: XCTestCase {
         XCTAssertEqual(appState.sessions["child-thread"]?.providerSessionId, "child-thread")
         XCTAssertEqual(appState.sessions["child-thread"]?.cwd, "/repo")
         XCTAssertEqual(appState.sessions["child-thread"]?.model, "gpt-test")
+        XCTAssertEqual(appState.sessions["child-thread"]?.remoteHostId, "test-remote")
+        XCTAssertEqual(appState.sessions["child-thread"]?.remoteHostName, "Test Remote")
         XCTAssertEqual(appState.sessions["child-thread"]?.currentTool, "sleep")
         XCTAssertEqual(appState.activeSessionId, "child-thread")
     }

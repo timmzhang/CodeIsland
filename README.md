@@ -21,12 +21,12 @@
 
 CodeIsland lives in your MacBook's notch area and shows you what your AI coding agents are doing — in real time. No more switching windows to check if Claude is waiting for approval or if Codex finished its task.
 
-It connects to **12 AI coding tools** via Unix socket IPC, displaying session status, tool calls, permission requests, and more — all in a compact, pixel-art styled panel.
+It connects to **13 AI coding tools** via Unix socket IPC, displaying session status, tool calls, permission requests, and more — all in a compact, pixel-art styled panel.
 
 ## Features
 
 - **Notch-native UI** — Expands from the MacBook notch, collapses when idle
-- **12 AI tools supported** — Claude Code, Codex, Gemini CLI, Cursor, Copilot, Trae/Traecli, Qoder, Factory, CodeBuddy, OpenCode, Kimi Code CLI, Cline
+- **13 AI tools supported** — Claude Code, Codex, Gemini CLI, Cursor, Copilot, Trae/Traecli, Qoder, Factory, CodeBuddy, OpenCode, Kimi Code CLI, Cline, Pi / Oh My Pi
 - **Live status tracking** — See active sessions, tool calls, and AI responses in real time
 - **Permission management** — Approve/deny tool permissions directly from the panel
 - **Question answering** — Respond to agent questions without leaving your current app
@@ -35,6 +35,7 @@ It connects to **12 AI coding tools** via Unix socket IPC, displaying session st
 - **Smart suppress** — Tab-level terminal detection: only suppresses notifications when you're looking at the specific session tab, not just the terminal app
 - **Sound effects** — Optional 8-bit sound notifications for session events
 - **Auto hook install** — Automatically configures hooks for all detected CLI tools, with auto-repair and version tracking
+- **iPhone & Apple Watch Buddy** — Mirror session status to Dynamic Island, Lock Screen, StandBy, and Apple Watch
 - **Bilingual UI** — English and Chinese, auto-detects system language
 - **Multi-display** — Works with external monitors, auto-detects notch displays
 
@@ -54,6 +55,7 @@ It connects to **12 AI coding tools** via Unix socket IPC, displaying session st
 | | <img src="Sources/CodeIsland/Resources/cli-icons/kimi.png" width="16"> Kimi Code CLI | 10 | Terminal | Full |
 | <img src="docs/images/mascots/opencode.gif" width="28"> | <img src="Sources/CodeIsland/Resources/cli-icons/opencode.png" width="16"> OpenCode | All | APP/Terminal | Full |
 | <img src="docs/images/mascots/cline.gif" width="28"> | <img src="Sources/CodeIsland/Resources/cli-icons/cline.png" width="16"> Cline | 5 | VSCode | Full |
+| | <img src="Sources/CodeIsland/Resources/cli-icons/pi.png" width="16"> Pi / Oh My Pi | 8 | Terminal | Full |
 
 ## Installation
 
@@ -72,6 +74,16 @@ brew install --cask codeisland
 4. Launch CodeIsland — it will automatically install hooks for all detected AI tools
 
 > **Note:** On first launch, macOS may show a security warning. Go to **System Settings → Privacy & Security** and click **Open Anyway**.
+
+### iPhone & Apple Watch Buddy
+
+Code Island Buddy is available on the App Store:
+
+[Download Code Island Buddy](https://apps.apple.com/us/app/code-island-buddy/id6773881129)
+
+The iPhone app mirrors your Mac sessions to Dynamic Island, Lock Screen, StandBy, and Apple Watch. The Mac app publishes lightweight session snapshots over your local network while the iPhone app is open, and sends compact Bluetooth summaries for background refreshes such as Live Activities and Watch updates.
+
+Code Island Buddy is completely free and open source. It does not require an account or an external server; the companion source code lives in this repository under `ios/CodeIslandCompanion` and `apple-companion`.
 
 ### Build from Source
 
@@ -102,6 +114,7 @@ AI Tool (Claude/Codex/Gemini/Cursor/...)
       → Unix socket → /tmp/codeisland-<uid>.sock
         → CodeIsland app receives event
           → Updates UI in real time
+          → Optional local Buddy sync to iPhone / Apple Watch
 ```
 
 CodeIsland installs lightweight hooks into each AI tool's config. When the tool triggers an event (session start, tool call, permission request, etc.), the hook sends a JSON message through a Unix socket. CodeIsland listens on this socket and updates the notch panel instantly.
@@ -119,6 +132,16 @@ CodeIsland provides a 7-tab settings panel:
 - **Sound** — 8-bit sound effects for session events
 - **Hooks** — View CLI installation status, reinstall or uninstall hooks
 - **About** — Version info and links
+
+## Keyboard Shortcuts
+
+| Shortcut | Action | Default |
+|----------|--------|---------|
+| ⌘⇧I | Toggle the island panel open/closed | On |
+| ⌘⇧A | Approve the current permission request | Off |
+| ⌘⇧D | Deny the current permission request | Off |
+
+All shortcuts are configurable — and more actions (always-allow, skip question, jump to terminal) can be bound — under **Settings → Shortcuts**. When an approve/deny shortcut is enabled, its binding shows as a badge right on the approval card.
 
 ## Requirements
 

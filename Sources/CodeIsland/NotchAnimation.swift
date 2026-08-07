@@ -9,6 +9,8 @@ enum NotchAnimation {
     static let pop = Animation.spring(response: 0.3, dampingFraction: 0.65)
     /// 微交互：hover 状态变化、按钮高亮等
     static let micro = Animation.easeOut(duration: 0.12)
+    /// Hover 预备段：全量展开的延迟计时期间，先给一个轻量的"我看到你了"反馈
+    static let hoverPrehover = Animation.easeOut(duration: NotchHoverInteraction.prehoverAnimationDuration)
 }
 
 // MARK: - Blur + Fade transition

@@ -12,7 +12,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var hookRecoveryTimer: Timer?
     private var claudeDesktopHookWatcher: ClaudeDesktopHookWatcher?
     private var lastHookCheck: Date = .distantPast
-    private var globalShortcutMonitor: Any?
+    private let hotKeyManager = GlobalHotKeyManager()
     private var localShortcutMonitor: Any?
     let appState = AppState()
 
@@ -74,6 +74,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         claudeDesktopHookWatcher = ClaudeDesktopHookWatcher()
         claudeDesktopHookWatcher?.start()
 
+        // Watch system sleep/wake so the mascot animations pause and re-anchor
+        // their periodic schedules instead of pinning a core after wake (#225).
+        MascotAnimationGate.shared.start()
+
         panelController = PanelWindowController(appState: appState)
         panelController?.showPanel()
 
@@ -92,6 +96,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let appState else { return }
             appState.handleBuddyControlCommand(command)
         }
+        AppleCompanionPublisher.shared.attach(appState)
+        AppleCompanionPublisher.shared.onFocusRequest = { [weak appState] mascot in
+            guard let appState else { return }
+            ESP32FocusCoordinator.handle(mascot: mascot, appState: appState)
+        }
+        AppleCompanionPublisher.shared.onControlCommand = { [weak appState] command in
+            guard let appState else { return }
+            appState.handleBuddyControlCommand(command)
+        }
+        AppleCompanionPublisher.shared.onQuestionAnswer = { [weak appState] answer in
+            guard let appState else { return }
+            appState.answerCompanionQuestion(answer)
+        }
         let buddyEnabled = UserDefaults.standard.bool(forKey: SettingsKey.esp32BridgeEnabled)
         let buddySyncInterval = UserDefaults.standard.double(forKey: SettingsKey.esp32HeartbeatSeconds)
         let buddyBrightness = UserDefaults.standard.double(forKey: SettingsKey.buddyScreenBrightnessPercent)
@@ -103,6 +120,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             heartbeatSeconds: buddySyncInterval > 0 ? buddySyncInterval : SettingsDefaults.esp32HeartbeatSeconds,
             brightnessPercent: buddyBrightness > 0 ? buddyBrightness : SettingsDefaults.buddyScreenBrightnessPercent,
             screenOrientation: buddyScreenOrientation
+        )
+        let appleCompanionEnabled = UserDefaults.standard.bool(forKey: SettingsKey.appleCompanionEnabled)
+        let appleCompanionHeartbeat = UserDefaults.standard.double(forKey: SettingsKey.appleCompanionHeartbeatSeconds)
+        AppleCompanionPublisher.shared.configure(
+            enabled: appleCompanionEnabled,
+            heartbeatSeconds: appleCompanionHeartbeat > 0 ? appleCompanionHeartbeat : SettingsDefaults.appleCompanionHeartbeatSeconds
         )
 
         // Hooks auto-recovery: periodic + app activation trigger
@@ -204,7 +227,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         guard !bindings.isEmpty else { return }
 
-        let handler: (NSEvent) -> Bool = { [weak self] event in
+        // Global path: Carbon RegisterEventHotKey fires from any frontmost app
+        // and — unlike an NSEvent global keyboard monitor — needs no
+        // Accessibility permission. This is the primary handler. See #217.
+        for b in bindings {
+            hotKeyManager.register(keyCode: b.keyCode, modifiers: b.mods) { [weak self] in
+                Task { @MainActor in self?.executeShortcut(b.action) }
+            }
+        }
+
+        // Local monitor: same-app fallback so the shortcut still works (and is
+        // swallowed) while CodeIsland's own panel/settings window is focused.
+        let localHandler: (NSEvent) -> Bool = { [weak self] event in
             let eventMods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             for b in bindings where event.keyCode == b.keyCode && eventMods == b.mods {
                 Task { @MainActor in self?.executeShortcut(b.action) }
@@ -212,19 +246,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return false
         }
-
-        globalShortcutMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
-            _ = handler(event)
-        }
         localShortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            handler(event) ? nil : event
+            localHandler(event) ? nil : event
         }
     }
 
     private func teardownGlobalShortcut() {
-        if let m = globalShortcutMonitor { NSEvent.removeMonitor(m) }
+        hotKeyManager.unregisterAll()
         if let m = localShortcutMonitor { NSEvent.removeMonitor(m) }
-        globalShortcutMonitor = nil
         localShortcutMonitor = nil
     }
 

@@ -6,6 +6,14 @@ private let log = Logger(subsystem: "com.codeisland", category: "Panel")
 
 private class KeyablePanel: NSPanel {
     override var canBecomeKey: Bool { true }
+
+    /// The island deliberately overlaps the menu-bar / notch area. AppKit's
+    /// default constrain clamps borderless windows below the menu bar whenever
+    /// the system re-places windows (display reconfigure, wake from sleep),
+    /// which detaches the panel from the notch (#263).
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
 }
 
 /// Ensures first click on a nonactivatingPanel fires SwiftUI actions
@@ -181,6 +189,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
         setupHorizontalDragMonitor()
         updatePosition()
         panel.orderFrontRegardless()
+        MascotAnimationGate.shared.setPanelVisible(true)
 
         // Screen change observer
         NotificationCenter.default.addObserver(
@@ -447,7 +456,26 @@ class PanelWindowController: NSObject, NSWindowDelegate {
         let dragOffset = SettingsManager.shared.allowHorizontalDrag
             ? CGFloat(SettingsManager.shared.panelHorizontalOffset)
             : 0
-        let x = clampedX(centeredX + dragOffset, panelWidth: size.width, on: screen)
+        var desiredX = centeredX + dragOffset
+
+        // #219: on external screens the simulated notch can land on third-party
+        // status items (Bartender & co.) — slide it into the nearest clear gap.
+        // A user-dragged offset is an explicit choice and always wins.
+        if SettingsManager.shared.avoidMenuBarIcons,
+           dragOffset == 0,
+           !ScreenDetector.screenHasNotch(screen) {
+            let occupied = MenuBarIconAvoidance.occupiedMenuBarRanges(on: screen)
+            desiredX = MenuBarIconAvoidance.resolvedX(
+                preferredX: desiredX,
+                panelWidth: size.width,
+                occupied: occupied,
+                screenMinX: screenFrame.minX,
+                screenMaxX: screenFrame.maxX,
+                maxShift: screenFrame.width * MenuBarIconAvoidance.maxShiftFraction
+            )
+        }
+
+        let x = clampedX(desiredX, panelWidth: size.width, on: screen)
         let y = screenFrame.maxY - size.height
         return NSRect(x: x, y: y, width: size.width, height: size.height)
     }
@@ -543,17 +571,20 @@ class PanelWindowController: NSObject, NSWindowDelegate {
         let settings = SettingsManager.shared
         if settings.hideInFullscreen && fullscreenLatch {
             panel.orderOut(nil)
+            MascotAnimationGate.shared.setPanelVisible(false)
             return
         }
 
         if settings.hideWhenNoSession && appState.activeSessionCount == 0 {
             panel.orderOut(nil)
+            MascotAnimationGate.shared.setPanelVisible(false)
             return
         }
 
         if !panel.isVisible {
             panel.orderFrontRegardless()
         }
+        MascotAnimationGate.shared.setPanelVisible(true)
     }
 
     private func isActiveSpaceFullscreen() -> Bool {
@@ -592,7 +623,17 @@ class PanelWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowDidMove(_ notification: Notification) {
-        // Drag is handled by setupHorizontalDragMonitor — no correction needed here.
+        // Horizontal drag (setupHorizontalDragMonitor) only ever changes x, and the
+        // screen-hop animation runs under isAnimatingScreenHop. A y drifted off the
+        // top edge therefore means the system re-placed the panel — e.g. a display
+        // reconfigure clamping it below the menu bar (#263) — so snap it back.
+        guard !isDraggingPanel, !isAnimatingScreenHop, let panel = panel else { return }
+        let expectedY = chosenScreen().frame.maxY - panel.frame.height
+        guard abs(panel.frame.origin.y - expectedY) > 0.5 else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isDraggingPanel, !self.isAnimatingScreenHop else { return }
+            self.updatePosition()
+        }
     }
 
     deinit {

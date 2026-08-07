@@ -34,6 +34,14 @@ final class L10nTests: XCTestCase {
         XCTAssertTrue(missingKeys.isEmpty, "Japanese is missing keys: \(missingKeys)")
     }
 
+    func testGermanTranslationsContainAllKeysPresentInEnglish() {
+        let enKeys = Set(L10n.strings["en"]?.keys ?? Dictionary<String, String>().keys)
+        let deKeys = Set(L10n.strings["de"]?.keys ?? Dictionary<String, String>().keys)
+
+        let missingKeys = enKeys.subtracting(deKeys)
+        XCTAssertTrue(missingKeys.isEmpty, "German is missing keys: \(missingKeys)")
+    }
+
     func testTurkishTranslationReturnsCorrectValue() {
         L10n.shared.language = "tr"
 
@@ -67,6 +75,17 @@ final class L10nTests: XCTestCase {
         XCTAssertEqual(L10n.shared["quit"], "終了")
     }
 
+    func testGermanTranslationReturnsCorrectValue() {
+        L10n.shared.language = "de"
+
+        XCTAssertEqual(L10n.shared["general"], "Allgemein")
+        XCTAssertEqual(L10n.shared["behavior"], "Verhalten")
+        XCTAssertEqual(L10n.shared["appearance"], "Darstellung")
+        XCTAssertEqual(L10n.shared["language"], "Sprache")
+        XCTAssertEqual(L10n.shared["settings_title"], "CodeIsland-Einstellungen")
+        XCTAssertEqual(L10n.shared["quit"], "Beenden")
+    }
+
     func testEffectiveLanguageReturnsTurkishWhenSystemLocaleIsTurkish() {
         L10n.shared.language = "system"
 
@@ -82,7 +101,7 @@ final class L10nTests: XCTestCase {
     }
 
     func testAllLanguageOptionsAvailableInSettings() {
-        let availableLanguages = ["system", "en", "zh", "ja", "ko", "tr"]
+        let availableLanguages = ["system", "en", "zh", "de", "ja", "ko", "tr"]
 
         for lang in availableLanguages {
             L10n.shared.language = lang
@@ -125,5 +144,17 @@ final class L10nTests: XCTestCase {
         let updateAvailable = L10n.shared["update_available_body"]
         let formattedUpdate = String(format: updateAvailable, "1.0.19", "1.0.18")
         XCTAssertEqual(formattedUpdate, "CodeIsland 1.0.19 が利用可能です (現在: 1.0.18)。ダウンロードしますか？")
+    }
+
+    func testGermanNumericPlaceholdersWork() {
+        L10n.shared.language = "de"
+
+        let customSoundSet = L10n.shared["custom_sound_set"]
+        let formatted = String(format: customSoundSet, "mysound.wav")
+        XCTAssertEqual(formatted, "Eigen: mysound.wav")
+
+        let updateAvailable = L10n.shared["update_available_body"]
+        let formattedUpdate = String(format: updateAvailable, "1.0.19", "1.0.18")
+        XCTAssertEqual(formattedUpdate, "CodeIsland 1.0.19 ist verfügbar (aktuell: 1.0.18). Möchtest du es herunterladen?")
     }
 }

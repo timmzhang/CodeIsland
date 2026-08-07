@@ -46,6 +46,10 @@ public enum CLIProcessResolver {
             return lowercasedPath.hasSuffix("/qodercli")
                 || lowercasedPath.contains("/qodercli ")
                 || lowercasedPath.contains("/@qoder-ai/qodercli")
+        case "google-antigravity":
+            return lowercasedPath.hasSuffix("/agy")
+                || lowercasedPath.contains("/agy ")
+                || lowercasedPath.contains("/google-antigravity")
         default:
             return lowercasedPath.contains("/\(normalizedSource)")
         }
@@ -126,7 +130,14 @@ public enum CLIProcessResolver {
     public static func inferSource(ancestry: [(pid: Int32, executablePath: String?)]) -> String? {
         // Try `-cli` variants first so `cursor-agent` doesn't get mis-attributed
         // to the desktop `cursor` source (see issue #134).
-        let all = SessionSnapshot.supportedSources
+        //
+        // Exclude desktop-IDE *host* sources entirely: their GUI host/helper
+        // processes appear in the ancestry of any CLI run from the IDE's
+        // integrated terminal and would be greedily matched by the loose
+        // `/<source>` substring rule, mis-attributing e.g. Claude Code run in
+        // Cursor's terminal to "cursor". Desktop IDEs always report themselves
+        // via `--source`, so they never need ancestry inference. (#220)
+        let all = SessionSnapshot.supportedSources.subtracting(SessionSnapshot.ideHostSources)
         let cliFirst = all.filter { $0.hasSuffix("-cli") }.sorted()
             + all.filter { !$0.hasSuffix("-cli") }.sorted()
         for entry in ancestry {
@@ -174,10 +185,16 @@ public struct HookEvent {
         }
         self.toolName = HookEvent.firstString(in: json, keys: ["tool_name", "toolName", "tool", "name"])
             ?? HookEvent.firstString(inNestedDictionary: json, containerKeys: ["tool", "payload", "data"], keys: ["name", "tool_name", "toolName"])
-        self.toolUseId = HookEvent.firstString(in: json, keys: ["tool_use_id", "toolUseId"])
+            ?? HookEvent.firstString(inNestedDictionary: json, containerKeys: ["toolCall"], keys: ["name"])
+        // `toolCallId` is ZCode's flat spelling of the same invocation id (its
+        // kernel emits {toolCallId, toolName, toolInput} on every tool event).
+        // Parsing it keeps zcode permission requests correlated by id so they
+        // are never mistaken for orphans and auto-resolved on session activity.
+        self.toolUseId = HookEvent.firstString(in: json, keys: ["tool_use_id", "toolUseId", "toolCallId"])
             ?? HookEvent.firstString(inNestedDictionary: json, containerKeys: ["tool", "tool_use", "toolUse", "payload", "data"], keys: ["id", "tool_use_id", "toolUseId"])
         self.toolInput = HookEvent.firstDictionary(in: json, keys: ["tool_input", "toolInput", "input", "arguments", "args", "params"])
             ?? HookEvent.firstDictionary(inNestedDictionary: json, containerKeys: ["tool", "payload", "data"], keys: ["input", "tool_input", "toolInput", "arguments", "args", "params"])
+            ?? HookEvent.firstDictionary(inNestedDictionary: json, containerKeys: ["toolCall"], keys: ["args"])
         self.agentId = json["agent_id"] as? String
         self.rawJSON = json
     }
@@ -194,9 +211,9 @@ public struct HookEvent {
     public var toolDescription: String? {
         if let input = toolInput {
             switch toolName {
-            case "Bash", "execute_command":
+            case "Bash", "execute_command", "run_command":
                 let desc = HookEvent.normalizedMultilineString(input["description"])
-                let cmd = HookEvent.normalizedMultilineString(input["command"])
+                let cmd = HookEvent.normalizedMultilineString(input["CommandLine"] ?? input["command"])
                 if let desc, let cmd {
                     if desc == cmd || desc.contains(cmd) {
                         return desc
@@ -205,25 +222,28 @@ public struct HookEvent {
                 }
                 if let desc { return desc }
                 if let cmd { return cmd }
-            case "Read", "read_file":
-                if let fp = input["file_path"] as? String {
+            case "Read", "read_file", "view_file":
+                if let fp = (input["AbsolutePath"] ?? input["file_path"]) as? String {
                     let name = (fp as NSString).lastPathComponent
+                    if let start = input["StartLine"] as? Int, let end = input["EndLine"] as? Int {
+                        return "\(name):\(start)-\(end)"
+                    }
                     if let offset = input["offset"] as? Int {
                         return "\(name):\(offset)"
                     }
                     return name
                 }
-            case "Edit", "apply_diff":
-                if let fp = input["file_path"] as? String {
+            case "Edit", "apply_diff", "replace_file_content", "multi_replace_file_content":
+                if let fp = (input["TargetFile"] ?? input["file_path"]) as? String {
                     return (fp as NSString).lastPathComponent
                 }
             case "Write", "write_to_file":
-                if let fp = input["file_path"] as? String {
+                if let fp = (input["TargetFile"] ?? input["file_path"]) as? String {
                     return (fp as NSString).lastPathComponent
                 }
-            case "Grep", "search_files":
-                if let pattern = input["pattern"] as? String {
-                    let path = (input["path"] as? String).map { " in \(($0 as NSString).lastPathComponent)" } ?? ""
+            case "Grep", "search_files", "grep_search":
+                if let pattern = (input["Query"] ?? input["pattern"]) as? String {
+                    let path = ((input["SearchPath"] ?? input["path"]) as? String).map { " in \(($0 as NSString).lastPathComponent)" } ?? ""
                     return "\(pattern)\(path)"
                 }
             case "Glob":
@@ -361,12 +381,23 @@ public struct QuestionPayload {
     public let options: [String]?
     public let descriptions: [String]?
     public let header: String?
+    /// When true the answer is sensitive (e.g. a Codex `isSecret` plan-mode
+    /// prompt). Remote peripherals (companion / ESP32) must not stream the
+    /// question text or options to avoid leaking secrets off-device.
+    public let isSecret: Bool
 
-    public init(question: String, options: [String]?, descriptions: [String]? = nil, header: String? = nil) {
+    public init(
+        question: String,
+        options: [String]?,
+        descriptions: [String]? = nil,
+        header: String? = nil,
+        isSecret: Bool = false
+    ) {
         self.question = question
         self.options = options
         self.descriptions = descriptions
         self.header = header
+        self.isSecret = isSecret
     }
 
     /// Try to extract question from a Notification hook event

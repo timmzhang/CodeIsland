@@ -84,6 +84,57 @@ final class CLIProcessResolverTests: XCTestCase {
         XCTAssertEqual(pid, 12345)
     }
 
+    // MARK: - inferSource (#220 / #95)
+
+    /// #220: Claude Code launched inside Cursor's integrated terminal fires the
+    /// source-less Claude hook. The real `claude` process is a Node binary (its
+    /// path does NOT end in `/claude`), while Cursor's GUI host/helper processes
+    /// carry `/cursor` in their path. inferSource must NOT greedily attribute the
+    /// session to the desktop `cursor` source — it should return nil so the
+    /// bridge falls back to the default "claude".
+    func testInferSourceIgnoresCursorIDEHostForSourcelessClaude() {
+        let ancestry: [(pid: Int32, executablePath: String?)] = [
+            // `claude` is really a Node script; argv0 is node, not .../claude.
+            (4321, "/opt/homebrew/bin/node"),
+            (4000, "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper.app/Contents/MacOS/Cursor Helper"),
+            (3000, "/Applications/Cursor.app/Contents/MacOS/Cursor"),
+        ]
+        XCTAssertNil(
+            CLIProcessResolver.inferSource(ancestry: ancestry),
+            "Cursor's GUI host must not be inferred as the `cursor` source (#220)"
+        )
+    }
+
+    /// #95 guard: the omo/OpenCode plugin fires the source-less Claude hook from
+    /// inside OpenCode. The real `opencode` binary IS in the ancestry, so
+    /// inferSource must still recover "opencode" (the original reason this
+    /// inference exists). The #220 fix must not regress this.
+    func testInferSourceStillRecoversOpenCodeFromAncestry() {
+        let ancestry: [(pid: Int32, executablePath: String?)] = [
+            (1234, "/bin/sh"),
+            (5678, "/Users/u/.opencode/bin/opencode"),
+        ]
+        XCTAssertEqual(
+            CLIProcessResolver.inferSource(ancestry: ancestry),
+            "opencode",
+            "Source-less Claude hooks fired from inside OpenCode must still resolve to opencode (#95)"
+        )
+    }
+
+    /// Cursor's CLI agent (`cursor-agent`) is a real CLI and must still be
+    /// recovered as `cursor-cli` — only the desktop IDE *host* is excluded.
+    func testInferSourceStillRecoversCursorCliAgent() {
+        let ancestry: [(pid: Int32, executablePath: String?)] = [
+            (5000, "/Users/u/.local/share/cursor-agent/versions/1.0/cursor-agent"),
+        ]
+        XCTAssertEqual(
+            CLIProcessResolver.inferSource(ancestry: ancestry),
+            "cursor-cli"
+        )
+    }
+
+    // MARK: - resolvedSessionPID
+
     /// Defensive: invalid (<= 0) immediate ppid is returned unchanged so
     /// callers can still encode it without contortion.
     func testResolvedSessionPIDReturnsImmediateParentWhenZeroOrNegative() {

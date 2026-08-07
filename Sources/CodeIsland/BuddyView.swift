@@ -1,13 +1,11 @@
 import SwiftUI
-import CodeIslandCore
 
 /// Buddy — CodeBuddy mascot, pixel-art cat astronaut.
 /// Purple #6C4DFF body with cyan-green #32E6B9 accents. Tencent Cloud style.
 struct BuddyView: View {
-    let status: AgentStatus
+    let status: MascotAgentStatus
     var size: CGFloat = 27
     @State private var alive = false
-    @Environment(\.mascotSpeed) private var speed
 
     // CodeBuddy brand palette
     private static let bodyC   = Color(red: 0.424, green: 0.302, blue: 1.0)   // #6C4DFF purple
@@ -150,11 +148,11 @@ struct BuddyView: View {
     // ━━━━━━ SLEEP ━━━━━━
     private var sleepScene: some View {
         ZStack {
-            TimelineView(.periodic(from: .now, by: 0.06)) { ctx in
-                sleepCanvas(t: ctx.date.timeIntervalSinceReferenceDate * speed)
+            MascotTimeline(interval: 0.12) { t in
+                sleepCanvas(t: t)
             }
-            TimelineView(.periodic(from: .now, by: 0.05)) { ctx in
-                floatingZs(t: ctx.date.timeIntervalSinceReferenceDate * speed)
+            MascotTimeline(interval: 0.12) { t in
+                floatingZs(t: t)
             }
         }
     }
@@ -179,8 +177,9 @@ struct BuddyView: View {
     }
 
     private func sleepCanvas(t: Double) -> some View {
-        let phase = t.truncatingRemainder(dividingBy: 4.0) / 4.0
-        let float = sin(phase * .pi * 2) * 0.6
+        // Two incommensurate drift periods — the float never quite repeats,
+        // and every mascot has its own rhythm so multi-session rows don't sync (#15).
+        let float = sin(t * 2 * .pi / 4.50) * 0.51 + sin(t * 2 * .pi / 6.95) * 0.27
 
         return Canvas { c, sz in
             let v = V(sz, svgW: 15, svgH: 13, svgY0: 3)  // taller viewport so ears don't clip
@@ -194,15 +193,18 @@ struct BuddyView: View {
 
     // ━━━━━━ WORK ━━━━━━
     private var workScene: some View {
-        TimelineView(.periodic(from: .now, by: 0.03)) { ctx in
-            workCanvas(t: ctx.date.timeIntervalSinceReferenceDate * speed)
+        MascotTimeline(interval: 0.03) { t in
+            workCanvas(t: t)
         }
     }
 
     private func workCanvas(t: Double) -> some View {
-        let bounce = sin(t * 2 * .pi / 0.4) * 1.0
-        let blinkCycle = t.truncatingRemainder(dividingBy: 2.5)
-        let blink: CGFloat = (blinkCycle > 2.2 && blinkCycle < 2.35) ? 0.1 : 1.0
+        // Work pause: every ~10s the bounce settles for a beat —
+        // reading output, not hammering keys nonstop (#15).
+        let workPause = MascotMotion.quirk(t, cycle: 10.2, duration: 1.2, seed: 0x131)
+        let bounce = sin(t * 2 * .pi / 0.4) * 1.0 * (1 - workPause)
+            + sin(t * 2 * .pi / 2.9) * 0.3 * workPause
+        let blink = max(0.1, MascotMotion.blink(t, seed: 0x132))
         let keyPhase = Int(t / 0.1) % 6
 
         return Canvas { c, sz in
@@ -242,8 +244,8 @@ struct BuddyView: View {
                 .blur(radius: size * 0.05)
                 .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: alive)
 
-            TimelineView(.periodic(from: .now, by: 0.03)) { ctx in
-                alertCanvas(t: ctx.date.timeIntervalSinceReferenceDate * speed)
+            MascotTimeline(interval: 0.03) { t in
+                alertCanvas(t: t)
             }
         }
     }

@@ -1,5 +1,5 @@
 // CodeIsland pi extension
-// version: v1
+// version: v2
 // OMP-compatible install
 
 /**
@@ -37,6 +37,11 @@ const ENV_KEYS = [
   "TMUX",
   "TMUX_PANE",
   "KITTY_WINDOW_ID",
+  "CMUX_SURFACE_ID",
+  "CMUX_WORKSPACE_ID",
+  "ZELLIJ_PANE_ID",
+  "ZELLIJ_SESSION_NAME",
+  "WEZTERM_PANE",
   "__CFBundleIdentifier",
 ] as const;
 
@@ -224,18 +229,130 @@ export default function codeislandExtension(pi: ExtensionAPI) {
    * "answered externally" heuristic from auto-denying while the card is visible.
    */
   const pendingPermissionSessions = new Set<string>();
+  /** Sessions for which CodeIsland has already received SessionStart. */
+  const startedSessions = new Set<string>();
+
+  async function ensureSessionStarted(sessionId: string, cwd: string): Promise<void> {
+    const sid = `pi-${sessionId}`;
+    if (startedSessions.has(sid)) return;
+
+    const sessionName = pi.getSessionName();
+    await sendToSocket(
+      base(sessionId, cwd, {
+        hook_event_name: "SessionStart",
+        ...(sessionName ? { session_title: sessionName } : {}),
+      }, tty),
+    );
+    startedSessions.add(sid);
+  }
+
+
+  /**
+   * Forwards an `ask` tool call to CodeIsland as an AskUserQuestion and waits
+   * for the user's on-island answer (#244).
+   *
+   * @returns A block result carrying the answers when the user answered in
+   *          CodeIsland, or `null` when the question should fall through to
+   *          OMP's own TUI dialog (skipped, denied, or CodeIsland not running).
+   */
+  async function forwardAskToCodeIsland(
+    event: { input: Record<string, unknown>; toolCallId: string },
+    ctx: { cwd: string },
+    sessionId: string,
+    sid: string,
+    tty: string | null,
+  ): Promise<{ block: true; reason: string } | null> {
+    const rawQuestions = Array.isArray(event.input.questions)
+      ? (event.input.questions as Array<Record<string, unknown>>)
+      : [];
+    if (rawQuestions.length === 0) return null;
+
+    // Map OMP's ask schema → Claude-style AskUserQuestion input.
+    const questions = rawQuestions.map((q) => {
+      const options = Array.isArray(q.options)
+        ? (q.options as Array<Record<string, unknown>>)
+            .map((o) => ({
+              label: typeof o.label === "string" ? o.label : "",
+              ...(typeof o.description === "string"
+                ? { description: o.description }
+                : {}),
+            }))
+            .filter((o) => o.label.length > 0)
+        : [];
+      return {
+        question: typeof q.question === "string" ? q.question : "Question",
+        ...(typeof q.id === "string" && q.id ? { header: q.id } : {}),
+        multiSelect: q.multi === true,
+        options,
+      };
+    });
+
+    // CodeIsland keys answers by question text, deduping repeats with `_2`,
+    // `_3`… suffixes — reproduce that here so we can translate back to ids.
+    const usedKeys = new Set<string>();
+    const answerKeys = questions.map(({ question }) => {
+      let key = question;
+      if (usedKeys.has(key)) {
+        let suffix = 2;
+        while (usedKeys.has(`${question}_${suffix}`)) suffix += 1;
+        key = `${question}_${suffix}`;
+      }
+      usedKeys.add(key);
+      return key;
+    });
+
+    pendingPermissionSessions.add(sid);
+    let response: Record<string, unknown> | null = null;
+    try {
+      response = await sendAndWaitResponse(
+        base(sessionId, ctx.cwd, {
+          hook_event_name: "PermissionRequest",
+          tool_name: "AskUserQuestion",
+          tool_input: { questions },
+          _pi_tool_call_id: event.toolCallId,
+        }, tty),
+        86_400_000, // waiting on a human — same 24h budget as PermissionRequest hooks
+      );
+    } finally {
+      pendingPermissionSessions.delete(sid);
+    }
+
+    const decision = (
+      response?.hookSpecificOutput as Record<string, unknown> | undefined
+    )?.decision as Record<string, unknown> | undefined;
+    if (decision?.behavior !== "allow") return null;
+
+    const updatedInput = decision.updatedInput as
+      | Record<string, unknown>
+      | undefined;
+    const answers = (updatedInput?.answers ?? {}) as Record<string, unknown>;
+
+    const lines = rawQuestions.map((q, i) => {
+      const id = typeof q.id === "string" && q.id ? q.id : `q${i + 1}`;
+      const value = answers[answerKeys[i]];
+      const text = Array.isArray(value)
+        ? value.map(String).join(", ")
+        : typeof value === "string"
+          ? value
+          : "";
+      return `${id}: ${text || "(no answer)"}`;
+    });
+
+    return {
+      block: true,
+      reason:
+        "The user already answered these questions through the CodeIsland desktop app. " +
+        "Their answers:\n" +
+        lines.join("\n") +
+        "\nDo not ask again — proceed using these answers.",
+    };
+  }
 
   // ── Session lifecycle ──────────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
-    const sessionName = pi.getSessionName();
-    await sendToSocket(
-      base(sessionId, ctx.cwd, {
-        hook_event_name: "SessionStart",
-        ...(sessionName ? { session_title: sessionName } : {}),
-      }, tty),
-    );
+    await ensureSessionStarted(sessionId, ctx.cwd);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -243,6 +360,7 @@ export default function codeislandExtension(pi: ExtensionAPI) {
     await sendToSocket(
       base(sessionId, ctx.cwd, { hook_event_name: "SessionEnd" }, tty),
     );
+    startedSessions.delete(`pi-${sessionId}`);
   });
 
   // ── Agent lifecycle ────────────────────────────────────────────────────────
@@ -250,6 +368,7 @@ export default function codeislandExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
     const sid = `pi-${sessionId}`;
+    await ensureSessionStarted(sessionId, ctx.cwd);
 
     if (pendingPermissionSessions.has(sid)) return;
 
@@ -265,6 +384,7 @@ export default function codeislandExtension(pi: ExtensionAPI) {
   pi.on("agent_end", async (event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
     const sid = `pi-${sessionId}`;
+    await ensureSessionStarted(sessionId, ctx.cwd);
 
     if (pendingPermissionSessions.has(sid)) return;
 
@@ -285,6 +405,7 @@ export default function codeislandExtension(pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
     const sid = `pi-${sessionId}`;
+    await ensureSessionStarted(sessionId, ctx.cwd);
     const toolName = displayToolName(event.toolName);
 
     // Build a tool_input object appropriate for the tool type.
@@ -296,6 +417,18 @@ export default function codeislandExtension(pi: ExtensionAPI) {
     if (event.toolName === "edit" || event.toolName === "write") {
       const path = event.input.path as string | undefined;
       if (path) toolInput.file_path = path;
+    }
+
+    // `ask` tool → mirror the question into CodeIsland's question UI (#244).
+    // tool_call fires BEFORE the TUI dialog opens and OMP awaits this handler,
+    // so we can hold the tool, let the user answer on the island (or watch/
+    // phone), and feed the answers back by blocking the tool with a result
+    // message. Skip/deny or an unreachable CodeIsland falls through to OMP's
+    // own TUI dialog — graceful degradation, never a lost question.
+    if (event.toolName === "ask") {
+      const answered = await forwardAskToCodeIsland(event, ctx, sessionId, sid, tty);
+      if (answered) return answered;
+      return undefined;
     }
 
     // Dangerous bash → send blocking PermissionRequest via bridge.
@@ -348,6 +481,7 @@ export default function codeislandExtension(pi: ExtensionAPI) {
   pi.on("tool_result", async (_event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
     const sid = `pi-${sessionId}`;
+    await ensureSessionStarted(sessionId, ctx.cwd);
 
     if (pendingPermissionSessions.has(sid)) return;
 
@@ -360,6 +494,7 @@ export default function codeislandExtension(pi: ExtensionAPI) {
 
   pi.on("session_before_compact", async (_event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
+    await ensureSessionStarted(sessionId, ctx.cwd);
     await sendToSocket(
       base(sessionId, ctx.cwd, { hook_event_name: "PreCompact" }, tty),
     );
@@ -367,6 +502,7 @@ export default function codeislandExtension(pi: ExtensionAPI) {
 
   pi.on("session_compact", async (_event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
+    await ensureSessionStarted(sessionId, ctx.cwd);
     await sendToSocket(
       base(sessionId, ctx.cwd, { hook_event_name: "PostCompact" }, tty),
     );

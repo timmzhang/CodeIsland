@@ -1,13 +1,11 @@
 import SwiftUI
-import CodeIslandCore
 
 /// QwenBot — Qwen Code mascot, interlocking geometric star.
 /// Purple-violet gradient (#7C3AED → #6D28D9 → #8B5CF6) from Qwen brand.
 struct QwenView: View {
-    let status: AgentStatus
+    let status: MascotAgentStatus
     var size: CGFloat = 27
     @State private var alive = false
-    @Environment(\.mascotSpeed) private var speed
 
     // Qwen brand palette — purple/violet
     private static let bodyC   = Color(red: 0.486, green: 0.228, blue: 0.929) // #7C3AED violet
@@ -125,11 +123,11 @@ struct QwenView: View {
     // ━━━━━━ SLEEP ━━━━━━
     private var sleepScene: some View {
         ZStack {
-            TimelineView(.periodic(from: .now, by: 0.06)) { ctx in
-                sleepCanvas(t: ctx.date.timeIntervalSinceReferenceDate * speed)
+            MascotTimeline(interval: 0.12) { t in
+                sleepCanvas(t: t)
             }
-            TimelineView(.periodic(from: .now, by: 0.05)) { ctx in
-                floatingZs(t: ctx.date.timeIntervalSinceReferenceDate * speed)
+            MascotTimeline(interval: 0.12) { t in
+                floatingZs(t: t)
             }
         }
     }
@@ -144,7 +142,9 @@ struct QwenView: View {
                 let fontSize = max(6, size * CGFloat(0.18 + phase * 0.10))
                 let baseOp = 0.7 - ci * 0.1
                 let opacity = phase < 0.8 ? baseOp : (1.0 - phase) * 3.5 * baseOp
-                let xOff = size * CGFloat(0.15 + ci * 0.08 + sin(phase * .pi * 2) * 0.03)
+                let wave = sin(phase * Double.pi * 2.0) * 0.03
+                let xOffsetRatio = 0.15 + ci * 0.08 + wave
+                let xOff = size * CGFloat(xOffsetRatio)
                 let yOff = -size * CGFloat(0.15 + phase * 0.38)
                 Text("z")
                     .font(.system(size: fontSize, weight: .black, design: .monospaced))
@@ -155,8 +155,10 @@ struct QwenView: View {
     }
 
     private func sleepCanvas(t: Double) -> some View {
-        let phase = t.truncatingRemainder(dividingBy: 4.0) / 4.0
-        let float = sin(phase * .pi * 2) * 0.8
+        // Two incommensurate drift periods — the float never quite repeats,
+        // and every mascot has its own rhythm so multi-session rows don't sync (#15).
+        let float = sin(t * 2 * .pi / 4.70) * 0.68 + sin(t * 2 * .pi / 6.47) * 0.36
+        let phase = (t / 4.70).truncatingRemainder(dividingBy: 1)
         let slowSpin = sin(phase * .pi * 2) * 8
         let blinkCycle = t.truncatingRemainder(dividingBy: 4.0)
         let blink: CGFloat = (blinkCycle > 3.5 && blinkCycle < 3.7) ? 0.15 : 0.5
@@ -172,16 +174,19 @@ struct QwenView: View {
 
     // ━━━━━━ WORK ━━━━━━
     private var workScene: some View {
-        TimelineView(.periodic(from: .now, by: 0.03)) { ctx in
-            workCanvas(t: ctx.date.timeIntervalSinceReferenceDate * speed)
+        MascotTimeline(interval: 0.03) { t in
+            workCanvas(t: t)
         }
     }
 
     private func workCanvas(t: Double) -> some View {
-        let bounce = sin(t * 2 * .pi / 0.4) * 1.0
+        // Work pause: every ~10s the bounce settles for a beat —
+        // reading output, not hammering keys nonstop (#15).
+        let workPause = MascotMotion.quirk(t, cycle: 9.6, duration: 1.2, seed: 0x7f5)
+        let bounce = sin(t * 2 * .pi / 0.4) * 1.0 * (1 - workPause)
+            + sin(t * 2 * .pi / 2.9) * 0.3 * workPause
         let spin = sin(t * 2 * .pi / 1.2) * 12
-        let blinkCycle = t.truncatingRemainder(dividingBy: 2.5)
-        let blink: CGFloat = (blinkCycle > 2.2 && blinkCycle < 2.35) ? 0.1 : 1.0
+        let blink = max(0.1, MascotMotion.blink(t, seed: 0x7f6))
         let keyPhase = Int(t / 0.1) % 6
 
         return Canvas { c, sz in
@@ -222,8 +227,8 @@ struct QwenView: View {
                 .blur(radius: size * 0.05)
                 .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: alive)
 
-            TimelineView(.periodic(from: .now, by: 0.03)) { ctx in
-                alertCanvas(t: ctx.date.timeIntervalSinceReferenceDate * speed)
+            MascotTimeline(interval: 0.03) { t in
+                alertCanvas(t: t)
             }
         }
     }

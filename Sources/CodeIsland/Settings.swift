@@ -17,12 +17,13 @@ enum NotchHeightMode: String, CaseIterable {
 
 enum SettingsKey {
     // Language
-    static let appLanguage = "appLanguage"                 // "system", "en", "zh", "ja", "ko", "tr"
+    static let appLanguage = "appLanguage"                 // "system", "en", "zh", "zh-Hant", "de", "ja", "ko", "tr"
 
     // General - System
     static let launchAtLogin = "launchAtLogin"
     static let displayChoice = "displayChoice"             // "auto", "builtin", "main"
     static let allowHorizontalDrag = "allowHorizontalDrag"
+    static let avoidMenuBarIcons = "avoidMenuBarIcons"
     static let panelHorizontalOffset = "panelHorizontalOffset"
 
     // General - Behavior
@@ -55,6 +56,19 @@ enum SettingsKey {
     static let soundApprovalNeeded = "soundApprovalNeeded"
     static let soundPromptSubmit = "soundPromptSubmit"
     static let soundBoot = "soundBoot"
+    // Quiet hours — minutes since midnight; start > end spans midnight
+    static let quietHoursEnabled = "quietHoursEnabled"
+    static let quietHoursStart = "quietHoursStart"
+    static let quietHoursEnd = "quietHoursEnd"
+
+    // Session cards
+    static let showGitBranch = "showGitBranch"
+
+    // Token-usage footer (local Claude transcript aggregation)
+
+    // Completion notification: "expand" | "glance" | "off". Successor of the
+    // boolean autoExpandOnCompletion — see AppState.completionStyle migration.
+    static let completionNotificationStyle = "completionNotificationStyle"
 
     // Shortcuts (per-action: shortcut_{action}_enabled, shortcut_{action}_keyCode, shortcut_{action}_modifiers)
     static func shortcutEnabled(_ action: String) -> String { "shortcut_\(action)_enabled" }
@@ -97,11 +111,19 @@ enum SettingsKey {
     static let selectedBuddyIdentifier = "selectedBuddyIdentifier"
     static let selectedBuddyName = "selectedBuddyName"
 
+    // Apple companion (iPhone / StandBy / Apple Watch prototype)
+    static let appleCompanionEnabled = "appleCompanionEnabled"
+    static let appleCompanionHeartbeatSeconds = "appleCompanionHeartbeatSeconds"
+
     // Auto-approve tools (comma-separated tool names)
     static let autoApproveTools = "autoApproveTools"
 
     // Hook cwd exclusion (comma-separated substrings; cwd containing any drops the event)
     static let excludedHookCwdSubstrings = "excludedHookCwdSubstrings"
+
+    // Claude Code config dir override (empty = auto-detect). Must match
+    // ClaudeConfigPaths.preferenceKey — that resolver is the only reader.
+    static let claudeConfigDir = "claude_config_dir"
 
     // Webhook forwarding: POST hook events to an external URL
     static let webhookEnabled = "webhookEnabled"
@@ -112,6 +134,7 @@ enum SettingsKey {
 struct SettingsDefaults {
     static let displayChoice = "auto"
     static let allowHorizontalDrag = false
+    static let avoidMenuBarIcons = true  // #219: dodge Bartender & friends on external screens
     static let panelHorizontalOffset = 0.0
     static let hideInFullscreen = true
     static let hideWhenNoSession = false
@@ -140,6 +163,10 @@ struct SettingsDefaults {
     static let soundApprovalNeeded = true
     static let soundPromptSubmit = false
     static let soundBoot = true
+    static let quietHoursEnabled = false
+    static let quietHoursStart = 22 * 60
+    static let quietHoursEnd = 8 * 60
+    static let showGitBranch = true
 
     static let rotationInterval = 5
 
@@ -164,6 +191,9 @@ struct SettingsDefaults {
     static let selectedBuddyIdentifier = ""
     static let selectedBuddyName = ""
 
+    static let appleCompanionEnabled = false
+    static let appleCompanionHeartbeatSeconds = 5.0
+
     // Default to no auto-approval — every tool call goes through the
     // approval flow and the user opts in per tool. The previous default
     // silently approved 9 internal agent tools (TaskCreate, TodoWrite,
@@ -171,6 +201,8 @@ struct SettingsDefaults {
     static let autoApproveTools = ""
 
     static let excludedHookCwdSubstrings = ""
+
+    static let claudeConfigDir = ""
 
     static let webhookEnabled = false
     static let webhookURL = ""
@@ -187,6 +219,7 @@ class SettingsManager {
         defaults.register(defaults: [
             SettingsKey.displayChoice: SettingsDefaults.displayChoice,
             SettingsKey.allowHorizontalDrag: SettingsDefaults.allowHorizontalDrag,
+            SettingsKey.avoidMenuBarIcons: SettingsDefaults.avoidMenuBarIcons,
             SettingsKey.panelHorizontalOffset: SettingsDefaults.panelHorizontalOffset,
             SettingsKey.hideInFullscreen: SettingsDefaults.hideInFullscreen,
             SettingsKey.hideWhenNoSession: SettingsDefaults.hideWhenNoSession,
@@ -213,6 +246,10 @@ class SettingsManager {
             SettingsKey.soundApprovalNeeded: SettingsDefaults.soundApprovalNeeded,
             SettingsKey.soundPromptSubmit: SettingsDefaults.soundPromptSubmit,
             SettingsKey.soundBoot: SettingsDefaults.soundBoot,
+            SettingsKey.quietHoursEnabled: SettingsDefaults.quietHoursEnabled,
+            SettingsKey.quietHoursStart: SettingsDefaults.quietHoursStart,
+            SettingsKey.quietHoursEnd: SettingsDefaults.quietHoursEnd,
+            SettingsKey.showGitBranch: SettingsDefaults.showGitBranch,
             SettingsKey.rotationInterval: SettingsDefaults.rotationInterval,
             SettingsKey.maxToolHistory: SettingsDefaults.maxToolHistory,
             SettingsKey.mascotSpeed: SettingsDefaults.mascotSpeed,
@@ -226,9 +263,12 @@ class SettingsManager {
             SettingsKey.buddyScreenOrientation: SettingsDefaults.buddyScreenOrientation,
             SettingsKey.selectedBuddyIdentifier: SettingsDefaults.selectedBuddyIdentifier,
             SettingsKey.selectedBuddyName: SettingsDefaults.selectedBuddyName,
+            SettingsKey.appleCompanionEnabled: SettingsDefaults.appleCompanionEnabled,
+            SettingsKey.appleCompanionHeartbeatSeconds: SettingsDefaults.appleCompanionHeartbeatSeconds,
             SettingsKey.defaultSource: SettingsDefaults.defaultSource,
             SettingsKey.autoApproveTools: SettingsDefaults.autoApproveTools,
             SettingsKey.excludedHookCwdSubstrings: SettingsDefaults.excludedHookCwdSubstrings,
+            SettingsKey.claudeConfigDir: SettingsDefaults.claudeConfigDir,
             SettingsKey.webhookEnabled: SettingsDefaults.webhookEnabled,
             SettingsKey.webhookURL: SettingsDefaults.webhookURL,
             SettingsKey.webhookEventFilter: SettingsDefaults.webhookEventFilter,
@@ -252,6 +292,11 @@ class SettingsManager {
     var allowHorizontalDrag: Bool {
         get { defaults.bool(forKey: SettingsKey.allowHorizontalDrag) }
         set { defaults.set(newValue, forKey: SettingsKey.allowHorizontalDrag) }
+    }
+
+    var avoidMenuBarIcons: Bool {
+        get { defaults.bool(forKey: SettingsKey.avoidMenuBarIcons) }
+        set { defaults.set(newValue, forKey: SettingsKey.avoidMenuBarIcons) }
     }
 
     var panelHorizontalOffset: Double {
@@ -371,6 +416,13 @@ class SettingsManager {
     var excludedHookCwdSubstrings: String {
         get { defaults.string(forKey: SettingsKey.excludedHookCwdSubstrings) ?? SettingsDefaults.excludedHookCwdSubstrings }
         set { defaults.set(newValue, forKey: SettingsKey.excludedHookCwdSubstrings) }
+    }
+
+    /// Explicit Claude Code config dir. Empty means auto-detect — see `ClaudeConfigPaths`.
+    /// Needed because a Finder-launched app inherits no `$CLAUDE_CONFIG_DIR`.
+    var claudeConfigDir: String {
+        get { defaults.string(forKey: SettingsKey.claudeConfigDir) ?? SettingsDefaults.claudeConfigDir }
+        set { defaults.set(newValue, forKey: SettingsKey.claudeConfigDir) }
     }
 }
 

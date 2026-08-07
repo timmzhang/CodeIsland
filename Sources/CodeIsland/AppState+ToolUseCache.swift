@@ -293,6 +293,69 @@ extension AppState {
         return found
     }
 
+    /// Resolve permission requests that can never be correlated by tool_use_id.
+    ///
+    /// resolveToolUseIfCompleted only drains a queued permission when a later event
+    /// carries the SAME non-empty tool_use_id. But Claude Code's PermissionRequest (or
+    /// its follow-up PostToolUse/Stop) sometimes carries NO tool_use_id at all — when
+    /// that happens the parked continuation has nothing to match against, so approving
+    /// in the terminal never dismisses the card (#216).
+    ///
+    /// When a follow-up activity event arrives for a session, treat any queued
+    /// permission for that session whose tool_use_id is empty/nil as approved-in-terminal:
+    /// resume with an allow and remove it. Requests that DO carry a tool_use_id are left
+    /// alone — they still wait for proper correlation so parallel tool calls don't deny
+    /// each other (#147).
+    ///
+    /// This blunt drain is the LAST resort: it is skipped whenever the activity event
+    /// itself carries a tool_use_id, because then the event identifies a specific tool
+    /// call and the precise paths own it — `resolveToolUseIfCompleted` (exact id, or
+    /// Claude input correlation) and `resolvePermissionFromTranscript` (the real
+    /// allow/deny Claude recorded). Without this guard a PostToolUse for a *different*
+    /// parallel call would auto-*allow* an unrelated card, and a decision the user
+    /// actually denied in the terminal could surface here as an allow.
+    func resolveOrphanPermissionsOnActivity(_ event: HookEvent) {
+        let normalized = EventNormalizer.normalize(event.eventName)
+        // Only activity events that mean "the agent moved on" past the prompt. A new
+        // PermissionRequest/Question is handled by their own enqueue paths, not here.
+        let activityEvents: Set<String> = [
+            "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "UserPromptSubmit"
+        ]
+        guard activityEvents.contains(normalized) else { return }
+        guard (event.toolUseId ?? "").isEmpty else { return }
+
+        let sessionId = event.sessionId ?? "default"
+        guard permissionQueue.contains(where: {
+            ($0.event.sessionId ?? "default") == sessionId && ($0.toolUseId?.isEmpty ?? true)
+        }) else { return }
+
+        let headWasOrphan = permissionQueue.first.map { head in
+            (head.event.sessionId ?? "default") == sessionId && (head.toolUseId?.isEmpty ?? true)
+        } ?? false
+
+        let allowBody = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
+        permissionQueue.removeAll { item in
+            guard (item.event.sessionId ?? "default") == sessionId,
+                  item.toolUseId?.isEmpty ?? true
+            else { return false }
+            log.notice("✅ permission approve reason=resolveOrphanPermissionsOnActivity session=\(sessionId, privacy: .public) tool=\(item.event.toolName ?? "nil", privacy: .public) triggerEvent=\(normalized, privacy: .public)")
+            item.continuation.resume(returning: Data(allowBody.utf8))
+            return true
+        }
+
+        // If the card we were showing was a drained orphan, advance to the next pending
+        // request (or collapse if nothing is left).
+        if headWasOrphan {
+            if permissionQueue.isEmpty {
+                if case .approvalCard = surface {
+                    surface = .collapsed
+                }
+            } else {
+                showNextPending()
+            }
+        }
+    }
+
     /// Remove stale cache entries. Called from the cleanup timer tick.
     func prunePendingToolUses(now: Date = Date()) {
         let cutoff = now.addingTimeInterval(-AppState.pendingToolUseTTL)

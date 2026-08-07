@@ -121,6 +121,12 @@ public final class CodexAppServerClient: @unchecked Sendable {
     private var nextRequestId: Int64 = 1
     private var isStopped: Bool = true
 
+    /// Test seams (internal, reached via @testable): the pipes wired to the
+    /// current child process, so tests can assert the EOF path disarms the
+    /// readability handlers instead of letting the dispatch source spin.
+    private(set) var currentStdoutPipe: Pipe?
+    private(set) var currentStderrPipe: Pipe?
+
     public var onMessage: MessageHandler?
     public var onExit: ExitHandler?
 
@@ -169,14 +175,23 @@ public final class CodexAppServerClient: @unchecked Sendable {
 
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            if data.isEmpty { return }
+            if data.isEmpty {
+                // EOF — the server closed stdout (usually: exited). Unhook, or the
+                // dispatch source re-invokes this handler in a tight loop forever,
+                // pinning a core (#278 class of bug).
+                handle.readabilityHandler = nil
+                return
+            }
             self?.ioQueue.async { self?.ingest(data: data) }
         }
         // Drain stderr to avoid filling the pipe buffer. We don't route it anywhere
         // by default; users who want the diagnostic stream can hook onto .onExit and
         // read the handle separately.
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            _ = handle.availableData
+            if handle.availableData.isEmpty {
+                // EOF — same spin hazard as stdout above.
+                handle.readabilityHandler = nil
+            }
         }
 
         proc.terminationHandler = { [weak self] finished in
@@ -193,6 +208,8 @@ public final class CodexAppServerClient: @unchecked Sendable {
 
         self.process = proc
         self.stdinHandle = stdinPipe.fileHandleForWriting
+        self.currentStdoutPipe = stdoutPipe
+        self.currentStderrPipe = stderrPipe
         self.readBuffer.removeAll(keepingCapacity: true)
         self.isStopped = false
         lock.unlock()
@@ -240,6 +257,18 @@ public final class CodexAppServerClient: @unchecked Sendable {
             "method": method,
         ]
         if let params { body["params"] = params }
+        try writeEnvelope(body)
+    }
+
+    /// Reply to a server-to-client JSON-RPC *request* (the server sends these for
+    /// e.g. `item/tool/requestUserInput`). The `id` must echo the request's id.
+    /// `result` is JSON-serializable (Dictionary/Array/scalar) or nil for `{}`.
+    public func sendResponse(id: CodexRequestID, result: Any?) throws {
+        let body: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id.jsonValue,
+            "result": result ?? [String: Any](),
+        ]
         try writeEnvelope(body)
     }
 

@@ -6,7 +6,9 @@ import CodeIslandCore
 /// Supports tab-level switching for: Ghostty, iTerm2, Terminal.app, WezTerm, kitty.
 /// Falls back to app-level activation for: Alacritty, Warp, Hyper, Tabby, Rio.
 struct TerminalActivator {
-    private static let knownTerminals: [(name: String, bundleId: String)] = [
+    // Internal (not private) so support tests can assert a terminal is recognized,
+    // matching sourceToNativeAppBundleId's visibility. See TeraxSupportTests.
+    static let knownTerminals: [(name: String, bundleId: String)] = [
         ("cmux", "com.cmuxterm.app"),
         ("Ghostty", "com.mitchellh.ghostty"),
         ("iTerm2", "com.googlecode.iterm2"),
@@ -14,6 +16,7 @@ struct TerminalActivator {
         ("Kaku", "fun.tw93.kaku"),
         ("kitty", "net.kovidgoyal.kitty"),
         ("Alacritty", "org.alacritty"),
+        ("Terax", "app.crynta.terax"),
         ("Warp", "dev.warp.Warp-Stable"),
         ("Terminal", "com.apple.Terminal"),
     ]
@@ -68,6 +71,10 @@ struct TerminalActivator {
         "com.stepfun.app": "StepFun",
         "ai.opencode.desktop": "OpenCode",
         "com.workbuddy.workbuddy": "WorkBuddy",
+        // Claude Code Desktop (#211). Deliberately NOT in sourceToNativeAppBundleId:
+        // most "claude" sessions are terminal CLI runs, and that fallback would
+        // steal their click-to-jump whenever the desktop app happens to be open.
+        "com.anthropic.claudefordesktop": "Claude",
     ]
 
     private static let sourceNativeAppOverrides: [String: String] = [
@@ -119,12 +126,26 @@ struct TerminalActivator {
             return
         }
 
-        // When termBundleId is missing and the source has a known desktop app that's
-        // running, prefer the desktop app over possibly-stale TERM_PROGRAM env. This
-        // handles e.g. OpenCode CLI launched from Ghostty but editing in VS Code — without
-        // this, the inherited TERM_PROGRAM=ghostty would jump to the wrong terminal.
-        if session.termBundleId == nil,
-           let nativeBundleId = sourceToNativeAppBundleId[session.source],
+        // --- Host GUI client detection (e.g. OpenChamber embedding OpenCode as a server) ---
+        // When an agent is spawned by a GUI client app — not from a terminal and not the
+        // agent's own desktop app — clicking the session should bring that host client to
+        // front instead of falling through to the terminal or the agent's native desktop
+        // app. Walk the CLI process ancestry looking for the nearest running regular GUI
+        // app that is neither a known terminal nor a known agent-native app; that app is
+        // the host. Generic by design: any current/future client (OpenChamber, …) works
+        // without hardcoding bundle IDs. Runs BEFORE the sourceToNativeAppBundleId branch
+        // below so a coincidentally-running agent desktop app never wins over the real host.
+        if let hostBid = resolveHostClientBundleId(for: session) {
+            activateByBundleId(hostBid)
+            return
+        }
+
+        // When the source has a known desktop app that's running, prefer the desktop
+        // app over the terminal. This handles e.g. OpenCode CLI launched from Ghostty but
+        // editing in VS Code — without this, the inherited TERM_PROGRAM=ghostty would jump
+        // to the wrong terminal. Also covers cases where the terminal bundle ID is present
+        // but the user wants to focus the desktop IDE instead (e.g. opencode → OpenCode).
+        if let nativeBundleId = sourceToNativeAppBundleId[session.source],
            NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == nativeBundleId }) {
             activateByBundleId(nativeBundleId)
             return
@@ -146,16 +167,52 @@ struct TerminalActivator {
         }
         let lower = termApp.lowercased()
 
+        // --- Superset (Electron agent-orchestration terminal): app-level activation ---
+        // Must come before the kitty/cmux/iTerm branches. Superset spoofs TERM_PROGRAM to
+        // "kitty" (so claude-code parses CSI-u keyboard input) and strips __CFBundleIdentifier
+        // from the PTY env, so without this the loose `lower.contains("kitty")` branch would
+        // launch/raise the REAL kitty app instead. Superset is a single-window Electron app with
+        // internal xterm.js panes and ships no focus/activate CLI or AppleScript dictionary, so
+        // pane precision is impossible upstream — we can only bring the Superset window forward
+        // (same app-level behavior as Warp / Alacritty fallback). The presence of any SUPERSET_*
+        // env var (captured into supersetWorkspaceId / supersetPaneId) uniquely identifies it.
+        // __CFBundleIdentifier is stripped so we can't tell canary from stable; default to the
+        // stable bundle and fall back to whichever variant is actually running. (#213)
+        if session.supersetWorkspaceId != nil || session.supersetPaneId != nil {
+            let supersetBundles = ["com.superset.desktop", "com.superset.desktop.canary"]
+            let runningBundle = supersetBundles.first(where: { bid in
+                NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == bid })
+            })
+            activateByBundleId(runningBundle ?? "com.superset.desktop")
+            return
+        }
+
         // --- Zellij multiplexer: precise pane → tab focus, then activate parent terminal ---
-        // Must come before tmux/cmux/iTerm/Ghostty branches: Zellij runs *inside* one of
-        // those terminals, so termApp/termBundleId points to the host shell. The presence
-        // of zellijPaneId is what disambiguates "running inside Zellij" from "plain shell".
+        // Must come before tmux/cmux/iTerm/Ghostty branches AND the Terax branch below:
+        // Zellij runs *inside* one of those terminals, so termApp/termBundleId points to
+        // the host shell. The presence of zellijPaneId is what disambiguates "running
+        // inside Zellij" from "plain shell".
         if let zellijPane = session.zellijPaneId, !zellijPane.isEmpty {
             activateZellij(
                 paneId: zellijPane,
                 sessionName: session.zellijSessionName,
                 preferredParentBundleId: session.termBundleId
             )
+            return
+        }
+
+        // --- Terax (native webview terminal): app-level activation only ---
+        // Like Superset, Terax (app.crynta.terax) is a single-window app whose tabs are
+        // drawn inside a webview. It exports no per-pane env id (only TERAX_TERMINAL /
+        // TERAX_BLOCKS) and ships no URL scheme, AppleScript dictionary, focus CLI, or
+        // native tab shortcut — and its tabs are absent from the accessibility tree — so
+        // per-tab precision is impossible upstream. Without this branch Terax has no
+        // TERM_PROGRAM, so detectRunningTerminal() would misroute the click to whichever
+        // other terminal happens to be running. Bring its window forward (Space-aware,
+        // same as Superset) via bundle id. Kept AFTER the Zellij branch so a Zellij
+        // session hosted in Terax still gets precise pane focus first.
+        if session.termBundleId == "app.crynta.terax" || lower == "terax" {
+            activateByBundleId("app.crynta.terax")
             return
         }
 
@@ -247,6 +304,50 @@ struct TerminalActivator {
         } else {
             bringToFront(termApp)
         }
+    }
+
+    /// Walks the CLI process ancestry looking for the nearest running GUI app that is
+    /// neither a known terminal nor a known agent-native app. Returns its bundle ID, or
+    /// nil when the agent runs in a plain terminal / its own desktop app / under launchd.
+    /// Used to jump back to GUI host clients (e.g. OpenChamber) that embed an agent such
+    /// as OpenCode as a managed server process. The ancestor walk is bounded (≤32 hops)
+    /// and click-driven, so cost is negligible.
+    private static func resolveHostClientBundleId(for session: SessionSnapshot) -> String? {
+        guard let pid = session.cliPid, pid > 0 else { return nil }
+
+        // Bundle IDs that must NEVER be treated as a "host client": known terminals
+        // (handled by tab/window-level switching further down) and agent-native desktop
+        // apps (handled by the nativeAppBundles / sourceToNativeAppBundleId branches).
+        var excluded = Set(knownTerminals.map { $0.bundleId })
+        excluded.formUnion(nativeAppBundles.keys)
+        excluded.formUnion(sourceToNativeAppBundleId.values)
+
+        // Snapshot once; match by processIdentifier while walking up the tree.
+        let regularApps = NSWorkspace.shared.runningApplications.filter {
+            $0.activationPolicy == .regular && $0.bundleIdentifier != nil
+        }
+
+        var current = pid
+        var seen = Set<pid_t>()
+        for _ in 0..<32 {
+            guard current > 1, !seen.contains(current) else { break }
+            seen.insert(current)
+            if let app = regularApps.first(where: { $0.processIdentifier == current }),
+               let bid = app.bundleIdentifier,
+               !excluded.contains(bid) {
+                return bid
+            }
+            guard let ppid = parentPID(of: current), ppid > 1 else { break }
+            current = ppid
+        }
+        return nil
+    }
+
+    private static func parentPID(of pid: pid_t) -> pid_t? {
+        var info = proc_bsdinfo()
+        let ret = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+        guard ret > 0, info.pbi_ppid > 0 else { return nil }
+        return pid_t(info.pbi_ppid)
     }
 
     // MARK: - Ghostty (AppleScript: match by CWD + session ID in title)

@@ -1,14 +1,12 @@
 import SwiftUI
-import CodeIslandCore
 
 /// CopilotBot — GitHub Copilot CLI mascot, adapted from copilot-avatar.svg.
 /// Two hollow ear loops (╭─╮╭─╮) on top, rose-framed face with gold dot eyes,
 /// and a pink mouth bar — a cute, minimal character.
 struct CopilotView: View {
-    let status: AgentStatus
+    let status: MascotAgentStatus
     var size: CGFloat = 27
     @State private var alive = false
-    @Environment(\.mascotSpeed) private var speed
 
     // Palette from copilot-avatar.svg
     private static let earC    = Color(red: 0.20, green: 0.20, blue: 0.20)  // #333 ear loops
@@ -129,12 +127,10 @@ struct CopilotView: View {
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     private var sleepScene: some View {
         ZStack {
-            TimelineView(.periodic(from: .now, by: 0.06)) { ctx in
-                let t = ctx.date.timeIntervalSinceReferenceDate * speed
+            MascotTimeline(interval: 0.12) { t in
                 sleepCanvas(t: t)
             }
-            TimelineView(.periodic(from: .now, by: 0.05)) { ctx in
-                let t = ctx.date.timeIntervalSinceReferenceDate * speed
+            MascotTimeline(interval: 0.12) { t in
                 floatingZs(t: t)
             }
         }
@@ -150,7 +146,9 @@ struct CopilotView: View {
                 let fontSize = max(6, size * CGFloat(0.18 + phase * 0.10))
                 let baseOpacity = 0.7 - ci * 0.1
                 let opacity = phase < 0.8 ? baseOpacity : (1.0 - phase) * 3.5 * baseOpacity
-                let xOff = size * CGFloat(0.08 + ci * 0.06 + sin(phase * .pi * 2) * 0.03)
+                let wave = sin(phase * Double.pi * 2.0) * 0.03
+                let xOffsetRatio = 0.08 + ci * 0.06 + wave
+                let xOff = size * CGFloat(xOffsetRatio)
                 let yOff = -size * CGFloat(0.15 + phase * 0.38)
                 Text("z")
                     .font(.system(size: fontSize, weight: .black, design: .monospaced))
@@ -161,8 +159,9 @@ struct CopilotView: View {
     }
 
     private func sleepCanvas(t: Double) -> some View {
-        let phase = t.truncatingRemainder(dividingBy: 4.0) / 4.0
-        let float = sin(phase * .pi * 2) * 0.8
+        // Two incommensurate drift periods — the float never quite repeats,
+        // and every mascot has its own rhythm so multi-session rows don't sync (#15).
+        let float = sin(t * 2 * .pi / 4.21) * 0.68 + sin(t * 2 * .pi / 6.85) * 0.36
 
         return Canvas { c, sz in
             let v = V(sz)
@@ -177,14 +176,17 @@ struct CopilotView: View {
     // WORK — bouncing, blinking, ear signals, keyboard
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     private var workScene: some View {
-        TimelineView(.periodic(from: .now, by: 0.03)) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate * speed
+        MascotTimeline(interval: 0.03) { t in
             workCanvas(t: t)
         }
     }
 
     private func workCanvas(t: Double) -> some View {
-        let bounce = sin(t * 2 * .pi / 0.4) * 1.0
+        // Work pause: every ~12s the bounce settles for a beat —
+        // reading output, not hammering keys nonstop (#15).
+        let workPause = MascotMotion.quirk(t, cycle: 11.6, duration: 1.2, seed: 0x8f8)
+        let bounce = sin(t * 2 * .pi / 0.4) * 1.0 * (1 - workPause)
+            + sin(t * 2 * .pi / 2.9) * 0.3 * workPause
         let keyPhase = Int(t / 0.1) % 6
 
         // Blink
@@ -238,8 +240,8 @@ struct CopilotView: View {
                 .blur(radius: size * 0.05)
                 .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: alive)
 
-            TimelineView(.periodic(from: .now, by: 0.03)) { ctx in
-                alertCanvas(t: ctx.date.timeIntervalSinceReferenceDate * speed)
+            MascotTimeline(interval: 0.03) { t in
+                alertCanvas(t: t)
             }
         }
     }

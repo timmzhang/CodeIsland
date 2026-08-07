@@ -231,7 +231,11 @@ extension AppState {
             let sessionId = pending.event.sessionId ?? activeSessionId ?? "default"
             let pendingSession = sessions[sessionId]
             var messages = pendingSession?.recentMessages ?? []
-            let questionText = pending.question.question.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Secret prompts (Codex `isSecret`) must not stream their text off-device. (#209)
+            let rawQuestionText = pending.question.isSecret
+                ? Self.secretQuestionPlaceholder
+                : pending.question.question
+            let questionText = rawQuestionText.trimmingCharacters(in: .whitespacesAndNewlines)
             if !questionText.isEmpty && messages.last?.text != questionText {
                 messages.append(ChatMessage(isUser: true, text: questionText))
             }
@@ -339,6 +343,164 @@ extension AppState {
         }
     }
 
+    func appleCompanionStatePayload(sequence: UInt64, session: SessionSnapshot? = nil) -> AppleCompanionStatePayload {
+        let displaySession = session ?? esp32DisplaySession()
+        let context = esp32DisplayContext(session: displaySession)
+        let displaySessionId = rotatingSessionId ?? activeSessionId ?? sessions.keys.sorted().first
+        let sessionId = pendingPermission?.event.sessionId
+            ?? pendingQuestion?.event.sessionId
+            ?? displaySessionId
+        let pendingAction: AppleCompanionPendingAction?
+        switch context.status {
+        case .waitingApproval:
+            pendingAction = .approval
+        case .waitingQuestion:
+            pendingAction = .question
+        default:
+            pendingAction = nil
+        }
+        let messages = context.messages.suffix(3).compactMap { message -> AppleCompanionMessagePreview? in
+            let text = Self.appleCompanionPreviewText(message.text)
+            guard !text.isEmpty else { return nil }
+            return AppleCompanionMessagePreview(
+                role: message.isUser ? .user : .assistant,
+                text: text
+            )
+        }
+        let questionPayload = appleCompanionQuestionPayload()
+        return AppleCompanionStatePayload(
+            sequence: sequence,
+            sessionId: sessionId,
+            source: context.source,
+            status: AppleCompanionStatus(context.status),
+            toolName: context.tool,
+            workspaceName: context.workspace,
+            messages: messages,
+            pendingAction: pendingAction,
+            question: questionPayload,
+            sessions: appleCompanionSessionPreviews(primarySessionId: sessionId)
+        )
+    }
+
+    private func appleCompanionSessionPreviews(primarySessionId: String?) -> [AppleCompanionSessionPreview] {
+        let sorted = sessions.sorted { lhs, rhs in
+            let leftPrimary = lhs.key == primarySessionId
+            let rightPrimary = rhs.key == primarySessionId
+            if leftPrimary != rightPrimary { return leftPrimary }
+
+            let leftPriority = appleCompanionSessionPriority(lhs.value.status)
+            let rightPriority = appleCompanionSessionPriority(rhs.value.status)
+            if leftPriority != rightPriority { return leftPriority > rightPriority }
+
+            return lhs.value.lastActivity > rhs.value.lastActivity
+        }
+
+        return sorted.prefix(5).map { sessionId, session in
+            let messages = session.recentMessages.suffix(2).compactMap { message -> AppleCompanionMessagePreview? in
+                let text = Self.appleCompanionPreviewText(message.text)
+                guard !text.isEmpty else { return nil }
+                return AppleCompanionMessagePreview(role: message.isUser ? .user : .assistant, text: text)
+            }
+            return AppleCompanionSessionPreview(
+                sessionId: sessionId,
+                source: session.source,
+                status: AppleCompanionStatus(session.status),
+                toolName: session.status == .idle ? nil : session.currentTool,
+                workspaceName: session.projectDisplayName,
+                message: appleCompanionSessionMessage(sessionId: sessionId, session: session),
+                messages: messages,
+                updatedAt: session.lastActivity
+            )
+        }
+    }
+
+    private func appleCompanionSessionMessage(sessionId: String, session: SessionSnapshot) -> String? {
+        if let pending = questionQueue.first(where: { ($0.event.sessionId ?? "default") == sessionId }) {
+            return Self.appleCompanionPreviewText(pending.question.question)
+        }
+        if let pending = permissionQueue.first(where: { ($0.event.sessionId ?? "default") == sessionId }) {
+            return Self.appleCompanionPreviewText(pending.event.toolDescription ?? session.toolDescription)
+        }
+        if let text = session.recentMessages.last?.text {
+            return Self.appleCompanionPreviewText(text)
+        }
+        return Self.appleCompanionPreviewText(session.lastAssistantMessage ?? session.lastUserPrompt)
+    }
+
+    private func appleCompanionSessionPriority(_ status: AgentStatus) -> Int {
+        switch status {
+        case .waitingApproval: return 5
+        case .waitingQuestion: return 4
+        case .running: return 3
+        case .processing: return 2
+        case .idle: return 0
+        }
+    }
+
+    private func appleCompanionQuestionPayload() -> AppleCompanionQuestionPayload? {
+        guard let pending = pendingQuestion else { return nil }
+
+        if let askState = pending.askUserQuestionState, !askState.items.isEmpty {
+            let index = askState.items.firstIndex { askState.answers[$0.answerKey] == nil } ?? 0
+            let item = askState.items[index]
+            // Secret prompts (Codex `isSecret`) must not stream their text/options
+            // off-device — answer on the Mac instead. (#209)
+            if item.payload.isSecret {
+                return AppleCompanionQuestionPayload(
+                    header: item.payload.header,
+                    question: Self.secretQuestionPlaceholder,
+                    options: [],
+                    descriptions: [],
+                    index: index + 1,
+                    total: askState.items.count,
+                    allowsMultipleSelection: item.multiSelect
+                )
+            }
+            return AppleCompanionQuestionPayload(
+                header: item.payload.header,
+                question: item.payload.question,
+                options: item.payload.options ?? [],
+                descriptions: item.payload.descriptions ?? [],
+                index: index + 1,
+                total: askState.items.count,
+                allowsMultipleSelection: item.multiSelect
+            )
+        }
+
+        if pending.question.isSecret {
+            return AppleCompanionQuestionPayload(
+                header: pending.question.header,
+                question: Self.secretQuestionPlaceholder,
+                options: [],
+                descriptions: [],
+                index: 1,
+                total: 1,
+                allowsMultipleSelection: false
+            )
+        }
+
+        return AppleCompanionQuestionPayload(
+            header: pending.question.header,
+            question: pending.question.question,
+            options: pending.question.options ?? [],
+            descriptions: pending.question.descriptions ?? [],
+            index: 1,
+            total: 1,
+            allowsMultipleSelection: false
+        )
+    }
+
+    /// Shown to remote peripherals in place of a secret prompt's real text.
+    private static let secretQuestionPlaceholder = "Sensitive prompt — answer on Mac"
+
+    private static func appleCompanionPreviewText(_ text: String?) -> String {
+        guard let text else { return "" }
+        let collapsed = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard collapsed.count > 240 else { return collapsed }
+        return String(collapsed.prefix(237)) + "..."
+    }
     func esp32MessagePreviewSegments(text: String?) -> [String] {
         guard let text else { return [] }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)

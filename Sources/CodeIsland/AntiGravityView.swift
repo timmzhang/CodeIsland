@@ -1,13 +1,11 @@
 import SwiftUI
-import CodeIslandCore
 
 /// AntiGravityBot — AntiGravity mascot, rainbow gradient swoosh character.
 /// Multicolor gradient inspired by the AntiGravity "A" logo.
 struct AntiGravityView: View {
-    let status: AgentStatus
+    let status: MascotAgentStatus
     var size: CGFloat = 27
     @State private var alive = false
-    @Environment(\.mascotSpeed) private var speed
 
     private static let color1  = Color(red: 0.30, green: 0.50, blue: 0.95) // blue
     private static let color2  = Color(red: 0.60, green: 0.35, blue: 0.90) // purple
@@ -100,10 +98,9 @@ struct AntiGravityView: View {
 
     private var sleepScene: some View {
         ZStack {
-            TimelineView(.periodic(from: .now, by: 0.06)) { ctx in
-                let t = ctx.date.timeIntervalSinceReferenceDate * speed
-                let phase = t.truncatingRemainder(dividingBy: 4.0) / 4.0
-                let float = sin(phase * .pi * 2) * 0.8
+            MascotTimeline(interval: 0.12) { t in
+                // De-synced dual-sine drift — unique rhythm per mascot (#15).
+                let float = sin(t * 2 * .pi / 4.45) * 0.68 + sin(t * 2 * .pi / 5.84) * 0.36
                 let blinkCycle = t.truncatingRemainder(dividingBy: 4.0)
                 let blink: CGFloat = (blinkCycle > 3.5 && blinkCycle < 3.7) ? 0.15 : 0.5
                 Canvas { c, sz in
@@ -114,8 +111,7 @@ struct AntiGravityView: View {
                     drawFace(c, v: v, dy: float, blinkPhase: blink)
                 }
             }
-            TimelineView(.periodic(from: .now, by: 0.05)) { ctx in
-                let t = ctx.date.timeIntervalSinceReferenceDate * speed
+            MascotTimeline(interval: 0.12) { t in
                 ZStack {
                     ForEach(0..<3, id: \.self) { i in
                         let ci = Double(i)
@@ -133,11 +129,11 @@ struct AntiGravityView: View {
     }
 
     private var workScene: some View {
-        TimelineView(.periodic(from: .now, by: 0.03)) { ctx in
-            let t = ctx.date.timeIntervalSinceReferenceDate * speed
-            let bounce = sin(t * 2 * .pi / 0.4) * 1.0
-            let blinkCycle = t.truncatingRemainder(dividingBy: 2.5)
-            let blink: CGFloat = (blinkCycle > 2.2 && blinkCycle < 2.35) ? 0.1 : 1.0
+        MascotTimeline(interval: 0.03) { t in
+            let workPause = MascotMotion.quirk(t, cycle: 11.6, duration: 1.2, seed: 0xaee)
+            let bounce = sin(t * 2 * .pi / 0.4) * 1.0 * (1 - workPause)
+                + sin(t * 2 * .pi / 2.9) * 0.3 * workPause
+            let blink = max(0.1, MascotMotion.blink(t, seed: 0xaef))
             let keyPhase = Int(t / 0.1) % 6
             Canvas { c, sz in
                 let v = V(sz, svgW: 16, svgH: 14, svgY0: 3)
@@ -163,8 +159,7 @@ struct AntiGravityView: View {
             Circle().fill(Self.alertC.opacity(alive ? 0.12 : 0)).frame(width: size * 0.8)
                 .blur(radius: size * 0.05)
                 .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: alive)
-            TimelineView(.periodic(from: .now, by: 0.03)) { ctx in
-                let t = ctx.date.timeIntervalSinceReferenceDate * speed
+            MascotTimeline(interval: 0.03) { t in
                 let pct = t.truncatingRemainder(dividingBy: 3.5) / 3.5
                 let jumpY = lerp([(0,0),(0.03,0),(0.175,-8),(0.25,1.5),(0.275,-6),(0.35,1),(0.375,-4),(0.45,0.8),(0.475,-2),(0.55,0.3),(0.62,0),(1,0)], at: pct)
                 let shakeX: CGFloat = (pct > 0.15 && pct < 0.55) ? sin(pct * 80) * 0.6 : 0

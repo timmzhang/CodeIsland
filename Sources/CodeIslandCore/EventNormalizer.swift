@@ -16,7 +16,7 @@ public enum EventNormalizer {
         case "afterAgentResponse":    return "AfterAgentResponse"
         case "stop":                  return "Stop"
         // Gemini
-        case "BeforeTool":            return "PreToolUse"
+        case "BeforeTool":            return "PermissionRequest"
         case "AfterTool":             return "PostToolUse"
         case "BeforeAgent":           return "SubagentStart"
         case "AfterAgent":            return "SubagentStop"
@@ -43,6 +43,14 @@ public enum EventNormalizer {
         case "pre_compact":           return "PreCompact"
         case "post_compact":          return "PostCompact"
         case "notification":          return "Notification"
+        // Hermes (Nous Research) — snake_case but diverged from Claude/Gemini (#226).
+        // `subagent_stop` already maps to SubagentStop in the traecli block above.
+        case "pre_tool_call":         return "PreToolUse"
+        case "post_tool_call":        return "PostToolUse"
+        case "pre_llm_call":          return "UserPromptSubmit"
+        case "on_session_start":      return "SessionStart"
+        case "on_session_end":        return "SessionEnd"
+        case "on_session_reset":      return "SessionEnd"
         // Cline (VSCode extension)
         case "TaskStart":             return "SessionStart"
         case "TaskResume":            return "UserPromptSubmit"

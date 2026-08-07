@@ -74,13 +74,10 @@ build_watch() {
 }
 
 build_mac() {
-    echo "Building $APP_NAME (universal)..."
+    echo "Building $APP_NAME (arm64 only)..."
     swift build -c release --arch arm64
-    swift build -c release --arch x86_64
 
-    echo "Creating universal binaries..."
     ARM_DIR=".build/arm64-apple-macosx/release"
-    X86_DIR=".build/x86_64-apple-macosx/release"
 
     echo "Creating app bundle..."
     rm -rf "$APP_BUNDLE"
@@ -89,10 +86,8 @@ build_mac() {
     mkdir -p "$APP_BUNDLE/Contents/Resources"
     mkdir -p "$APP_BUNDLE/Contents/Frameworks"
 
-    lipo -create "$ARM_DIR/$APP_NAME" "$X86_DIR/$APP_NAME" \
-         -output "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-    lipo -create "$ARM_DIR/codeisland-bridge" "$X86_DIR/codeisland-bridge" \
-         -output "$APP_BUNDLE/Contents/Helpers/codeisland-bridge"
+    cp "$ARM_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+    cp "$ARM_DIR/codeisland-bridge" "$APP_BUNDLE/Contents/Helpers/codeisland-bridge"
     cp Info.plist "$APP_BUNDLE/Contents/Info.plist"
 
     echo "Embedding frameworks..."
@@ -200,15 +195,30 @@ build_mac() {
         echo "Creating DMG..."
         DMG_PATH="$BUILD_DIR/$APP_NAME.dmg"
         rm -f "$DMG_PATH"
-        create-dmg \
-            --volname "$APP_NAME" \
-            --window-pos 200 120 \
-            --window-size 600 400 \
-            --icon-size 100 \
-            --icon "$APP_NAME.app" 150 185 \
-            --app-drop-link 450 185 \
-            --no-internet-enable \
-            "$DMG_PATH" "$APP_BUNDLE"
+        if command -v create-dmg >/dev/null 2>&1; then
+            create-dmg \
+                --volname "$APP_NAME" \
+                --window-pos 200 120 \
+                --window-size 600 400 \
+                --icon-size 100 \
+                --icon "$APP_NAME.app" 150 185 \
+                --app-drop-link 450 185 \
+                --no-internet-enable \
+                "$DMG_PATH" "$APP_BUNDLE"
+        else
+            echo "create-dmg not found, using hdiutil fallback..."
+            DMG_STAGING="$BUILD_DIR/dmg-staging"
+            rm -rf "$DMG_STAGING"
+            mkdir -p "$DMG_STAGING"
+            ditto "$APP_BUNDLE" "$DMG_STAGING/$APP_NAME.app"
+            ln -s /Applications "$DMG_STAGING/Applications"
+            hdiutil create \
+                -volname "$APP_NAME" \
+                -srcfolder "$DMG_STAGING" \
+                -format UDZO \
+                -ov \
+                "$DMG_PATH"
+        fi
 
         codesign --force --sign "$SIGN_ID" "$DMG_PATH"
         echo "Notarizing DMG..."

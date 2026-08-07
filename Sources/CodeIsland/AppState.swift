@@ -7,6 +7,29 @@ import CodeIslandCore
 
 private let log = Logger(subsystem: "com.codeisland", category: "AppState")
 
+/// FSEventStream context target. Callbacks hold an unretained pointer to this
+/// box (not `AppState`), and reach the owner only through `weak`, so queued
+/// main-queue deliveries stay safe if `AppState` tears down off the main actor.
+private final class ProjectsWatcherBox: @unchecked Sendable {
+    weak var appState: AppState?
+    private let lock = NSLock()
+    private var cancelled = false
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    func handleChange() {
+        lock.lock()
+        let isCancelled = cancelled
+        lock.unlock()
+        guard !isCancelled else { return }
+        appState?.handleProjectsDirChange()
+    }
+}
+
 struct CodexSubagentMetadata: Equatable, Sendable {
     let parentThreadId: String
     let agentType: String?
@@ -104,7 +127,21 @@ final class AppState {
     var pendingQuestion: QuestionRequest? { questionQueue.first }
     /// Preview-only: mock question payload for DebugHarness (no continuation needed)
     var previewQuestionPayload: QuestionPayload?
-    var surface: IslandSurface = .collapsed
+    var surface: IslandSurface = .collapsed {
+        didSet {
+            // Any expansion counts as "seen" for the glance completion dot.
+            if surface.isExpanded, glanceCompletionActive {
+                glanceDismissTask?.cancel()
+                glanceCompletionActive = false
+            }
+        }
+    }
+
+    /// Glance completion mode: an agent finished while the pill was collapsed —
+    /// light the dot instead of expanding. Cleared when the user expands the
+    /// panel, with a long failsafe so a missed dot never lingers forever.
+    var glanceCompletionActive = false
+    private var glanceDismissTask: Task<Void, Never>?
 
     var justCompletedSessionId: String? {
         if case .completionCard(let id) = surface { return id }
@@ -112,19 +149,33 @@ final class AppState {
     }
 
     private var maxHistory: Int { SettingsManager.shared.maxToolHistory }
-    private var cleanupTimer: Timer?
+    /// Torn down from `deinit`, which may run off the main actor (e.g. async
+    /// XCTest ARC). Only mutated on the main actor while `self` is alive.
+    @ObservationIgnored
+    nonisolated(unsafe) private var cleanupTimer: Timer?
     private var autoCollapseTask: Task<Void, Never>?
     private var completionQueue: [String] = []
     /// Mouse must enter the panel before auto-collapse is allowed (prevents instant dismiss)
     var completionHasBeenEntered = false
     /// Auto-collapse timer fired but mouse is inside panel — defer collapse until mouse leaves
     var deferCollapseOnMouseLeave = false
-    private var processMonitors: [String: (source: DispatchSourceProcess, process: ProcessIdentity)] = [:]
+    /// `attachParentPid` is the monitored process's ppid captured when the monitor was
+    /// attached. Processes that already had ppid <= 1 at attach time are launchd-managed
+    /// daemons (e.g. a Hermes gateway with KeepAlive=true), NOT orphans of a closed
+    /// terminal — they must never be terminated by orphan cleanup (#243).
+    /// Cancelled from `deinit` off the main actor.
+    @ObservationIgnored
+    nonisolated(unsafe) private var processMonitors: [String: (source: DispatchSourceProcess, process: ProcessIdentity, attachParentPid: pid_t?)] = [:]
     private var exitingSessions: [String: ProcessIdentity] = [:]
-    private var saveTimer: Timer?
-    private var fsEventStream: FSEventStreamRef?
+    @ObservationIgnored
+    nonisolated(unsafe) private var saveTimer: Timer?
+    @ObservationIgnored
+    nonisolated(unsafe) private var fsEventStream: FSEventStreamRef?
+    @ObservationIgnored
+    nonisolated(unsafe) private var projectsWatcherBox: ProjectsWatcherBox?
     private var lastFSScanTime: Date = .distantPast
-    private var discoveryScanTask: Task<Void, Never>?
+    @ObservationIgnored
+    nonisolated(unsafe) private var discoveryScanTask: Task<Void, Never>?
     private var pendingDiscoveryRescan = false
     private var isShowingCompletion: Bool {
         if case .completionCard = surface { return true }
@@ -159,7 +210,8 @@ final class AppState {
         guard let rid = rotatingSessionId else { return nil }
         return sessions[rid]
     }
-    private var rotationTimer: Timer?
+    @ObservationIgnored
+    nonisolated(unsafe) private var rotationTimer: Timer?
 
     private func startCleanupTimer() {
         guard cleanupTimer == nil else { return }
@@ -183,10 +235,12 @@ final class AppState {
                 deadMonitors.append((sessionId, process))
                 continue
             }
-            // Check for orphaned processes (ppid <= 1)
-            var info = proc_bsdinfo()
-            let ret = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
-            if ret > 0 && info.pbi_ppid <= 1 && shouldTerminateOrphanedProcess(sessionId: sessionId, pid: pid) {
+            // Check for orphaned processes: ppid <= 1 now, but only if the process had a
+            // real parent when we attached. A process whose ppid was already <= 1 at attach
+            // time is a launchd-managed daemon, not a terminal orphan — killing it puts
+            // KeepAlive daemons into a SIGTERM/restart loop (#243).
+            if Self.isReparentedOrphan(currentParentPid: Self.parentPid(of: pid), attachParentPid: monitor.attachParentPid)
+                && shouldTerminateOrphanedProcess(sessionId: sessionId, pid: pid) {
                 orphaned.append((sessionId, pid))
             }
         }
@@ -196,6 +250,7 @@ final class AppState {
             handleProcessExit(sessionId: sessionId, exitedProcess: process)
         }
         for (sessionId, pid) in orphaned {
+            log.notice("⚠️ terminating reparented orphan pid=\(pid, privacy: .public) session=\(sessionId, privacy: .public)")
             kill(pid, SIGTERM)
             removeSession(sessionId)
         }
@@ -413,6 +468,24 @@ final class AppState {
         return !Self.isNativeAppProcess(pid, source: source)
     }
 
+    /// Current ppid of `pid`, or nil if the process is gone / info is unavailable.
+    nonisolated static func parentPid(of pid: pid_t) -> pid_t? {
+        var info = proc_bsdinfo()
+        let ret = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+        guard ret > 0 else { return nil }
+        return pid_t(info.pbi_ppid)
+    }
+
+    /// A process counts as a terminal orphan only when it USED to have a real parent
+    /// (attachParentPid > 1) and has since been reparented to launchd/init (ppid <= 1).
+    /// Daemons started by launchd have ppid <= 1 from the beginning and are never
+    /// orphans, no matter how long they run (#243). Unknown attach ppid stays safe: no kill.
+    nonisolated static func isReparentedOrphan(currentParentPid: pid_t?, attachParentPid: pid_t?) -> Bool {
+        guard let currentParentPid, currentParentPid <= 1 else { return false }
+        guard let attachParentPid, attachParentPid > 1 else { return false }
+        return true
+    }
+
     private nonisolated static func liveProcessIdentity(for pid: pid_t) -> ProcessIdentity? {
         guard pid > 0, kill(pid, 0) == 0 else { return nil }
         return ProcessIdentity(pid: pid, startTime: getProcessStartTime(pid))
@@ -469,6 +542,10 @@ final class AppState {
             || path.contains("/trae-cn.app/contents/")
             || path.contains("/traecn.app/contents/")
         case "qoder":      return path.contains("/qoder.app/contents/")
+        // QoderWork desktop app (#249) — bundle id undocumented; the standard
+        // /Applications/QoderWork.app layout is assumed, pending real-install
+        // verification.
+        case "qoderwork":  return path.contains("/qoderwork.app/contents/")
         case "droid":      return path.contains("/factory.app/contents/")
         case "codebuddy":  return path.contains("/codebuddy.app/contents/")
         case "codybuddycn": return path.contains("/codebuddycn.app/contents/") || path.contains("/codebuddy.app/contents/")
@@ -476,9 +553,16 @@ final class AppState {
         case "codex":      return path.contains("/codex.app/contents/")
         case "opencode":   return path.contains("/opencode.app/contents/")
         case "antigravity": return path.contains("/antigravity.app/contents/")
+        // Google Antigravity IDE — host app is Antigravity.app. Same .app path as
+        // the fork, but the check is per-source so a "google-antigravity" session
+        // (whose host genuinely IS Antigravity.app) never collides with the fork's
+        // "antigravity" CLI sessions (#215).
+        case "google-antigravity": return path.contains("/antigravity.app/contents/")
         case "workbuddy":   return path.contains("/workbuddy.app/contents/")
         case "hermes":      return path.contains("/hermes.app/contents/")
+        // Claude Code Desktop (#211): local Code-tab sessions live inside Claude.app.
         case "claude":      return path.contains("/claude.app/contents/")
+        case "zcode":       return path.contains("/zcode.app/contents/")
         default:           return false
         }
     }
@@ -516,7 +600,7 @@ final class AppState {
             }
         }
         source.resume()
-        processMonitors[sessionId] = (source: source, process: process)
+        processMonitors[sessionId] = (source: source, process: process, attachParentPid: Self.parentPid(of: process.pid))
         exitingSessions.removeValue(forKey: sessionId)
 
         // Keep cliPid aligned with the monitored process unless we already have a different
@@ -777,6 +861,7 @@ final class AppState {
             rotatingSessionId = cachedActiveIds.first
         }
         ESP32StatePublisher.shared.notifyDirty()
+        AppleCompanionPublisher.shared.notifyDirty()
     }
 
     /// Start monitoring the CLI process for a session.
@@ -851,32 +936,63 @@ final class AppState {
         case "codex":      return findCodexPids(candidatePids: candidatePids)
         case "gemini":     return findGeminiPids(candidatePids: candidatePids)
         case "cursor":     return findCursorPids(candidatePids: candidatePids)
+        case "cursor-cli": return findCursorCliPids(candidatePids: candidatePids)
         case "trae":       return findTraePids(candidatePids: candidatePids)
         case "traecn":     return findTraeCNPids(candidatePids: candidatePids)
         case "traecli":   return findTraeCliPids(candidatePids: candidatePids)
         case "copilot":    return findCopilotPids(candidatePids: candidatePids)
         case "qoder":      return findQoderPids(candidatePids: candidatePids)
+        case "qoder-cli":  return findQoderCliPids(candidatePids: candidatePids)
+        case "qoderwork":  return findQoderWorkPids(candidatePids: candidatePids)
         case "droid":      return findFactoryPids(candidatePids: candidatePids)
         case "codebuddy":  return findCodeBuddyPids(candidatePids: candidatePids)
         case "codybuddycn": return findCodyBuddyCNPids(candidatePids: candidatePids)
         case "stepfun":    return findStepFunPids(candidatePids: candidatePids)
         case "opencode":   return findOpenCodePids(candidatePids: candidatePids)
         case "antigravity": return findAntiGravityPids(candidatePids: candidatePids)
+        case "google-antigravity": return findGoogleAntigravityPids(candidatePids: candidatePids)
         case "workbuddy":  return findWorkBuddyPids(candidatePids: candidatePids)
         case "hermes":     return findHermesPids(candidatePids: candidatePids)
         case "qwen":       return findQwenPids(candidatePids: candidatePids)
         case "kimi":       return findKimiPids(candidatePids: candidatePids)
         case "pi":         return findPiPids(candidatePids: candidatePids)
         case "cline":      return findClinePids(candidatePids: candidatePids)
+        case "zcode":      return findZcodePids(candidatePids: candidatePids)
         default:           return []
         }
     }
 
+    enum CompletionStyle: String {
+        case expand, glance, off
+    }
+
+    /// Three-way completion notification style. Migration: the pre-glance
+    /// boolean `autoExpandOnCompletion` (#146) maps false → .off; anything
+    /// else (including "never set", which registers as true) → .expand.
+    nonisolated static func completionStyle(defaults: UserDefaults = .standard) -> CompletionStyle {
+        if let raw = defaults.string(forKey: SettingsKey.completionNotificationStyle),
+           let style = CompletionStyle(rawValue: raw) {
+            return style
+        }
+        if defaults.object(forKey: SettingsKey.autoExpandOnCompletion) != nil,
+           defaults.bool(forKey: SettingsKey.autoExpandOnCompletion) == false {
+            return .off
+        }
+        return .expand
+    }
+
     private func enqueueCompletion(_ sessionId: String) {
-        // Behavior setting (#146): respect "Auto-expand on agent completion".
-        // When disabled the panel stays compact — status indicators still
-        // update, but no completion card pops down.
-        guard UserDefaults.standard.bool(forKey: SettingsKey.autoExpandOnCompletion) else { return }
+        switch Self.completionStyle() {
+        case .off:
+            // Panel stays compact — status indicators still update, but no
+            // completion card pops down (#146).
+            return
+        case .glance:
+            flashGlanceCompletionIndicator()
+            return
+        case .expand:
+            break
+        }
 
         // Don't queue duplicates
         if completionQueue.contains(sessionId) || justCompletedSessionId == sessionId { return }
@@ -890,12 +1006,63 @@ final class AppState {
         }
     }
 
+    /// Last unresolved-branch probe per session — keeps `gitBranch == nil`
+    /// (non-repo cwds, SessionStart snapshot rebuilds) from probing on every event.
+    private var gitBranchCheckedAt: [String: Date] = [:]
+
+    /// Branch resolution runs detached: .git probing on a dead network mount
+    /// must never beachball the main actor. Triggers on cwd changes, at Stop
+    /// (the turn may have switched branches), and while unresolved (throttled).
+    private func maybeRefreshGitBranch(for sessionId: String, cwdBefore: String?, normalizedEventName: String) {
+        guard let session = sessions[sessionId],
+              session.remoteHostId == nil,
+              let cwd = session.cwd else { return }
+        let unresolvedDue = session.gitBranch == nil
+            && Date().timeIntervalSince(gitBranchCheckedAt[sessionId] ?? .distantPast) > 60
+        guard cwd != cwdBefore || normalizedEventName == "Stop" || unresolvedDue else { return }
+        gitBranchCheckedAt[sessionId] = Date()
+        Task.detached(priority: .utility) {
+            let info = GitBranchReader.read(cwd: cwd)
+            await MainActor.run { [weak self] in
+                guard let self, var s = self.sessions[sessionId], s.cwd == cwd else { return }
+                s.gitBranch = info?.branch
+                s.gitIsWorktree = info?.isWorktree ?? false
+                self.sessions[sessionId] = s
+            }
+        }
+    }
+
+    private func flashGlanceCompletionIndicator() {
+        guard !surface.isExpanded else { return }  // user is already looking
+        glanceCompletionActive = true
+        glanceDismissTask?.cancel()
+        glanceDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 600_000_000_000)
+            guard !Task.isCancelled else { return }
+            glanceCompletionActive = false
+        }
+    }
+
     /// Fast app-level suppress check (main-thread safe, no blocking).
     private func shouldSuppressAppLevel(for sessionId: String) -> Bool {
-        guard UserDefaults.standard.bool(forKey: SettingsKey.smartSuppress) else { return false }
+        !shouldAutoOpenPendingSurface(for: sessionId)
+    }
+
+    func shouldAutoOpenPendingSurface(
+        for sessionId: String,
+        isTerminalFrontmost: (SessionSnapshot) -> Bool = TerminalVisibilityDetector.isTerminalFrontmostForSession
+    ) -> Bool {
+        guard UserDefaults.standard.bool(forKey: SettingsKey.smartSuppress) else { return true }
         guard let session = sessions[sessionId],
-              (session.termApp != nil || session.termBundleId != nil) else { return false }
-        return TerminalVisibilityDetector.isTerminalFrontmostForSession(session)
+              (session.termApp != nil || session.termBundleId != nil) else { return true }
+        return !isTerminalFrontmost(session)
+    }
+
+    private func shouldAutoOpenQuestionSurface(for event: HookEvent) -> Bool {
+        // AskUserQuestion holds the provider/CLI until its continuation resolves,
+        // so there is no parallel terminal prompt for Smart Suppress to defer to.
+        if event.toolName == "AskUserQuestion" { return true }
+        return shouldAutoOpenPendingSurface(for: event.sessionId ?? "default")
     }
 
     private func showCompletion(_ sessionId: String) {
@@ -1027,6 +1194,7 @@ final class AppState {
         if activeSessionCount != summary.activeSessionCount { activeSessionCount = summary.activeSessionCount }
         if totalSessionCount != summary.totalSessionCount { totalSessionCount = summary.totalSessionCount }
         ESP32StatePublisher.shared.notifyDirty()
+        AppleCompanionPublisher.shared.notifyDirty()
     }
 
     private func refreshProviderTitle(for trackedSessionId: String, providerSessionId: String? = nil) {
@@ -1058,6 +1226,17 @@ final class AppState {
             return
         }
 
+        let source = event.rawJSON["_source"] as? String
+        let hasTranscriptPath = (event.rawJSON["transcript_path"] as? String)
+            .map { !$0.isEmpty } ?? false
+        if Self.isCodexPlaceholderHook(
+            source: source,
+            cwd: event.rawJSON["cwd"] as? String,
+            hasTranscriptPath: hasTranscriptPath
+        ) {
+            return
+        }
+
         let sessionId = event.sessionId ?? "default"
 
         // Skip Codex APP internal sessions (title generation, etc.) — they have no transcript
@@ -1074,11 +1253,16 @@ final class AppState {
         let normalizedEventName = EventNormalizer.normalize(event.eventName)
         let prevStatus = sessions[sessionId]?.status
         let wasWaiting = prevStatus == .waitingApproval || prevStatus == .waitingQuestion
+        let cwdBeforeReduce = sessions[sessionId]?.cwd
 
         // Cache PreToolUse payloads so downstream events sharing tool_use_id can be
         // correlated, and drain queue entries whose agent already moved on.
         cachePreToolUseIfApplicable(event)
         resolveToolUseIfCompleted(event)
+        // #216: permission requests with no correlatable tool_use_id can't be drained by
+        // resolveToolUseIfCompleted. A follow-up activity event means the user already
+        // approved in the terminal — resume those (and only those) as approved.
+        resolveOrphanPermissionsOnActivity(event)
 
         let effects = reduceEvent(sessions: &sessions, event: event, maxHistory: maxHistory)
 
@@ -1091,6 +1275,10 @@ final class AppState {
             attachTranscriptTailerIfNeeded(sessionId: sessionId)
             transcriptTailer.flush(sessionId: sessionId)
         }
+
+        // After reduce: remoteHostId is authoritative (extractMetadata just ran),
+        // so a remote session can never probe the local filesystem here.
+        maybeRefreshGitBranch(for: sessionId, cwdBefore: cwdBeforeReduce, normalizedEventName: normalizedEventName)
 
         // Backfill model after metadata extraction. Hooks are inconsistent across providers,
         // so retry with a cooldown instead of giving up permanently on the first miss.
@@ -1128,7 +1316,8 @@ final class AppState {
         }
 
         // Detect Cursor YOLO mode once per session (nil = unchecked)
-        if event.rawJSON["_source"] as? String == "cursor",
+        if let source = event.rawJSON["_source"] as? String,
+           (source == "cursor" || source == "cursor-cli"),
            sessions[sessionId]?.isYoloMode == nil {
             sessions[sessionId]?.isYoloMode = Self.detectCursorYoloMode()
         }
@@ -1215,16 +1404,30 @@ final class AppState {
             sessions[sessionId] = SessionSnapshot()
         }
         // Extract metadata so blocking-first parent sessions have cwd/source/PID.
-        // Subagent events are routed through the parent session ID; their metadata
-        // can describe the child session and should not overwrite the parent.
+        // Subagent events are routed through the parent session ID; their full metadata
+        // can describe the child session and should not overwrite the parent — only fill gaps.
+        // `routesAsSubagent` (not `agentId == nil`) is the gate: an empty or `solo_agent`
+        // agentId marks a main-session event that must still write full metadata.
         if !event.routesAsSubagent {
             extractMetadata(into: &sessions, sessionId: sessionId, event: event)
+        } else {
+            fillMissingParentMetadataFromSubagentEvent(into: &sessions, sessionId: sessionId, event: event)
         }
         if let providerSessionId = event.sessionId, !providerSessionId.isEmpty {
             sessions[sessionId]?.providerSessionId = providerSessionId
         }
         attachTranscriptTailerIfNeeded(sessionId: sessionId)
         tryMonitorSession(sessionId)
+
+        // Closed Task/subagent ids must not surface new permission UI (parity with
+        // ensureSubagent refusing late tool hooks after Stop).
+        if shouldSuppressClosedSubagentUI(sessionId: sessionId, agentId: event.agentId) {
+            let denyResponse = Data(
+                #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8
+            )
+            continuation.resume(returning: denyResponse)
+            return
+        }
 
         if let replayedResponse = recentPermissionDecision(for: event) {
             sessions[sessionId]?.status = .running
@@ -1243,6 +1446,7 @@ final class AppState {
         sessions[sessionId]?.currentTool = event.toolName
         sessions[sessionId]?.toolDescription = event.toolDescription
         sessions[sessionId]?.lastActivity = Date()
+        markMergedSubagentWaiting(sessionId: sessionId, agentId: event.agentId, status: .waitingApproval)
         // Backfill tool name/description from cached PreToolUse when the payload is thin.
         enrichPermissionRequestFromCache(sessionId: sessionId, event: event)
 
@@ -1262,7 +1466,7 @@ final class AppState {
             activeSessionId = sessionId
             // If user is already browsing the session list, keep them there and
             // let inline controls handle approval without stealing focus.
-            if surface != .sessionList {
+            if surface != .sessionList, shouldAutoOpenPendingSurface(for: sessionId) {
                 surface = .approvalCard(sessionId: sessionId)
             }
             SoundManager.shared.handleEvent("PermissionRequest")
@@ -1280,6 +1484,8 @@ final class AppState {
             _ = CodexPermissionRules().persistAlwaysAllowRule(for: pending.event)
             let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
             responseData = Data(response.utf8)
+        } else if always, Self.isZcodeEvent(pending.event) {
+            responseData = Self.zcodeAlwaysAllowResponse(toolName: pending.event.toolName)
         } else if always, TraeCNPermissionRules.isTraeCNEvent(pending.event) {
             _ = TraeCNPermissionRules().persistAlwaysAllowRule(for: pending.event)
             let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
@@ -1299,6 +1505,16 @@ final class AppState {
             responseData = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
         } else if always {
             let toolName = pending.event.toolName ?? ""
+            // MCP tools (`mcp__server__tool`) don't accept a rule specifier — the
+            // rule must be the bare tool name. Sending `ruleContent: "*"` makes
+            // Claude Code assemble `mcp__server__tool(*)`, which never matches an
+            // actual MCP call, so the "always allow" rule silently fails to
+            // persist and the same approval keeps re-prompting. Non-MCP tools
+            // (Bash/Read/Edit/…) keep the `*` specifier. (#224)
+            var rule: [String: Any] = ["toolName": toolName]
+            if !toolName.hasPrefix("mcp__") {
+                rule["ruleContent"] = "*"
+            }
             let obj: [String: Any] = [
                 "hookSpecificOutput": [
                     "hookEventName": "PermissionRequest",
@@ -1306,7 +1522,7 @@ final class AppState {
                         "behavior": "allow",
                         "updatedPermissions": [[
                             "type": "addRules",
-                            "rules": [["toolName": toolName, "ruleContent": "*"]],
+                            "rules": [rule],
                             "behavior": "allow",
                             "destination": "session"
                         ]]
@@ -1320,7 +1536,13 @@ final class AppState {
         }
         rememberPermissionDecision(responseData, for: pending.event)
         pending.continuation.resume(returning: responseData)
-        sessions[sessionId]?.status = .running
+        resolveMergedSubagentAfterUI(
+            sessionId: sessionId,
+            agentId: pending.event.agentId,
+            subagentStatus: .running,
+            keepSubagentTool: pending.event.toolName,
+            idleParentWhenNoAgent: false
+        )
 
         showNextPending()
         refreshDerivedState()
@@ -1371,6 +1593,41 @@ final class AppState {
         return "claude|\(sessionId)|input|\(toolName)|\(serializedInput)"
     }
 
+    nonisolated static func isZcodeEvent(_ event: HookEvent) -> Bool {
+        SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) == "zcode"
+    }
+
+    /// "Always allow" response for a ZCode PermissionRequest hook (#258).
+    ///
+    /// ZCode validates hook stdout with a STRICT schema (unknown keys void the
+    /// whole decision, and ZCode falls back to its own dialog). Persistent
+    /// rules therefore go in `permissionUpdates` — NOT Claude's
+    /// `updatedPermissions` — and there is no `destination` key. A rule with a
+    /// bare `toolName` (no `ruleContent`) matches every future call of that
+    /// tool, which is exactly the "always allow this tool" semantic; a
+    /// `ruleContent` of "*" would instead be compared against the call's
+    /// command/path subject and never match. Events without a tool name can't
+    /// form a valid rule (toolName must be non-empty), so they degrade to a
+    /// plain one-time allow.
+    nonisolated static func zcodeAlwaysAllowResponse(toolName: String?) -> Data {
+        let plainAllow = Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#.utf8)
+        guard let toolName, !toolName.isEmpty else { return plainAllow }
+        let obj: [String: Any] = [
+            "hookSpecificOutput": [
+                "hookEventName": "PermissionRequest",
+                "decision": [
+                    "behavior": "allow",
+                    "permissionUpdates": [[
+                        "type": "addRules",
+                        "behavior": "allow",
+                        "rules": [["toolName": toolName]],
+                    ] as [String: Any]]
+                ] as [String: Any]
+            ] as [String: Any]
+        ]
+        return (try? JSONSerialization.data(withJSONObject: obj)) ?? plainAllow
+    }
+
     func handleBuddyControlCommand(_ command: BuddyControlCommand) {
         switch command {
         case .approveCurrentPermission:
@@ -1392,6 +1649,38 @@ final class AppState {
                 log.info("Ignored Buddy skip command because question queue is empty")
             }
         }
+    }
+
+    func answerCompanionQuestion(_ answer: String) {
+        guard !questionQueue.isEmpty else {
+            log.info("Ignored companion question answer because question queue is empty")
+            return
+        }
+
+        if questionQueue[0].isFromPermission,
+           var askState = questionQueue[0].askUserQuestionState {
+            guard let index = askState.items.firstIndex(where: { askState.answers[$0.answerKey] == nil }) else {
+                answerQuestionMulti(askState.items.map {
+                    (question: $0.payload.question, answer: askState.answers[$0.answerKey] ?? "")
+                })
+                return
+            }
+
+            let item = askState.items[index]
+            askState.answers[item.answerKey] = answer
+            questionQueue[0].askUserQuestionState = askState
+
+            if askState.canConfirm {
+                answerQuestionMulti(askState.items.map {
+                    (question: $0.payload.question, answer: askState.answers[$0.answerKey] ?? "")
+                })
+            } else {
+                refreshDerivedState()
+            }
+            return
+        }
+
+        answerQuestion(answer)
     }
 
     /// Find an existing session whose source matches and whose CLI PID equals
@@ -1450,9 +1739,14 @@ final class AppState {
         dismissedPermissionSessionIds.remove(sessionId)
         let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#
         pending.continuation.resume(returning: Data(response.utf8))
-        sessions[sessionId]?.status = .idle
-        sessions[sessionId]?.currentTool = nil
-        sessions[sessionId]?.toolDescription = nil
+        // Folded Task deny must not idle the whole parent chat card.
+        resolveMergedSubagentAfterUI(
+            sessionId: sessionId,
+            agentId: pending.event.agentId,
+            subagentStatus: .processing,
+            keepSubagentTool: nil,
+            idleParentWhenNoAgent: true
+        )
 
         if activeSessionId == sessionId {
             activeSessionId = mostActiveSessionId()
@@ -1487,8 +1781,15 @@ final class AppState {
         }
         if !event.routesAsSubagent {
             extractMetadata(into: &sessions, sessionId: sessionId, event: event)
+        } else {
+            fillMissingParentMetadataFromSubagentEvent(into: &sessions, sessionId: sessionId, event: event)
         }
         tryMonitorSession(sessionId)
+
+        if shouldSuppressClosedSubagentUI(sessionId: sessionId, agentId: event.agentId) {
+            continuation.resume(returning: Data("{}".utf8))
+            return
+        }
 
         guard let question = QuestionPayload.from(event: event) else {
             continuation.resume(returning: Data("{}".utf8))
@@ -1498,14 +1799,17 @@ final class AppState {
 
         sessions[sessionId]?.status = .waitingQuestion
         sessions[sessionId]?.lastActivity = Date()
+        markMergedSubagentWaiting(sessionId: sessionId, agentId: event.agentId, status: .waitingQuestion)
 
         let request = QuestionRequest(event: event, question: question, continuation: continuation)
         questionQueue.append(request)
 
         if questionQueue.count == 1 {
             activeSessionId = sessionId
-            withAnimation(NotchAnimation.open) {
-                surface = .questionCard(sessionId: sessionId)
+            if shouldAutoOpenPendingSurface(for: sessionId) {
+                withAnimation(NotchAnimation.open) {
+                    surface = .questionCard(sessionId: sessionId)
+                }
             }
             SoundManager.shared.handleEvent("PermissionRequest")
         }
@@ -1519,8 +1823,18 @@ final class AppState {
         }
         if !event.routesAsSubagent {
             extractMetadata(into: &sessions, sessionId: sessionId, event: event)
+        } else {
+            fillMissingParentMetadataFromSubagentEvent(into: &sessions, sessionId: sessionId, event: event)
         }
         tryMonitorSession(sessionId)
+
+        if shouldSuppressClosedSubagentUI(sessionId: sessionId, agentId: event.agentId) {
+            let denyResponse = Data(
+                #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8
+            )
+            continuation.resume(returning: denyResponse)
+            return
+        }
 
         let originalQuestions = event.toolInput?["questions"] as? [[String: Any]]
         var askItems: [AskUserQuestionItem] = []
@@ -1603,6 +1917,7 @@ final class AppState {
 
         sessions[sessionId]?.status = .waitingQuestion
         sessions[sessionId]?.lastActivity = Date()
+        markMergedSubagentWaiting(sessionId: sessionId, agentId: event.agentId, status: .waitingQuestion)
 
         let askState = AskUserQuestionState(items: askItems, answers: [:])
         let request = QuestionRequest(
@@ -1616,8 +1931,10 @@ final class AppState {
 
         if questionQueue.count == 1 {
             activeSessionId = sessionId
-            withAnimation(NotchAnimation.open) {
-                surface = .questionCard(sessionId: sessionId)
+            if shouldAutoOpenQuestionSurface(for: event) {
+                withAnimation(NotchAnimation.open) {
+                    surface = .questionCard(sessionId: sessionId)
+                }
             }
             SoundManager.shared.handleEvent("PermissionRequest")
         }
@@ -1626,8 +1943,22 @@ final class AppState {
 
     func answerQuestion(_ answer: String) {
         guard !questionQueue.isEmpty else { return }
-        // AskUserQuestion uses batch wizard — direct single answers are not processed
-        if questionQueue[0].isFromPermission, questionQueue[0].askUserQuestionState != nil {
+        // Multi-question wizards (AskUserQuestion, Codex app-server) use the batch
+        // path — direct single answers are not processed.
+        if questionQueue[0].askUserQuestionState != nil,
+           (questionQueue[0].isFromPermission || questionQueue[0].isCodexAppServer) {
+            return
+        }
+        // Codex app-server questions reply over the JSON-RPC client, not a hook.
+        if questionQueue[0].isCodexAppServer {
+            let pending = questionQueue.removeFirst()
+            let answerKey = pending.askUserQuestionState?.items.first?.answerKey
+                ?? pending.question.header ?? "answer"
+            pending.resolveCodexAppServer([answerKey: [answer]])
+            let sessionId = pending.event.sessionId ?? "default"
+            sessions[sessionId]?.status = .processing
+            showNextPending()
+            refreshDerivedState()
             return
         }
         let pending = questionQueue.removeFirst()
@@ -1659,9 +1990,15 @@ final class AppState {
             ]
             responseData = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
         }
-        pending.continuation.resume(returning: responseData)
+        pending.resolution.resumeHook(returning: responseData)
         let sessionId = pending.event.sessionId ?? "default"
-        sessions[sessionId]?.status = .processing
+        resolveMergedSubagentAfterUI(
+            sessionId: sessionId,
+            agentId: pending.event.agentId,
+            subagentStatus: .running,
+            keepSubagentTool: nil,
+            idleParentWhenNoAgent: false
+        )
 
         showNextPending()
         refreshDerivedState()
@@ -1669,6 +2006,26 @@ final class AppState {
 
     func answerQuestionMulti(_ answers: [(question: String, answer: String)]) {
         guard !questionQueue.isEmpty else { return }
+        // Codex app-server questions reply over the JSON-RPC client, not a hook.
+        if questionQueue[0].isCodexAppServer {
+            let pending = questionQueue.removeFirst()
+            var answersByKey: [String: [String]] = [:]
+            if let askState = pending.askUserQuestionState {
+                // Match by position — the wizard collects answers in item order.
+                for (index, item) in askState.items.enumerated() where index < answers.count {
+                    answersByKey[item.answerKey] = [answers[index].answer]
+                }
+            } else {
+                let answerKey = pending.question.header ?? "answer"
+                answersByKey[answerKey] = [answers.first?.answer ?? ""]
+            }
+            pending.resolveCodexAppServer(answersByKey)
+            let sessionId = pending.event.sessionId ?? "default"
+            sessions[sessionId]?.status = .processing
+            showNextPending()
+            refreshDerivedState()
+            return
+        }
         let pending = questionQueue.removeFirst()
         let responseData: Data
         if pending.isFromPermission {
@@ -1709,9 +2066,15 @@ final class AppState {
             ]
             responseData = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
         }
-        pending.continuation.resume(returning: responseData)
+        pending.resolution.resumeHook(returning: responseData)
         let sessionId = pending.event.sessionId ?? "default"
-        sessions[sessionId]?.status = .processing
+        resolveMergedSubagentAfterUI(
+            sessionId: sessionId,
+            agentId: pending.event.agentId,
+            subagentStatus: .running,
+            keepSubagentTool: nil,
+            idleParentWhenNoAgent: false
+        )
 
         showNextPending()
         refreshDerivedState()
@@ -1740,15 +2103,27 @@ final class AppState {
     func skipQuestion() {
         guard !questionQueue.isEmpty else { return }
         let pending = questionQueue.removeFirst()
-        let responseData: Data
-        if pending.isFromPermission {
-            responseData = Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8)
+        if pending.isCodexAppServer {
+            // No "skip" verb in the Codex protocol — abandon the request so the
+            // server stops waiting (it will re-prompt or fall back to its TUI).
+            pending.resolveCodexAppServer(nil)
         } else {
-            responseData = Data(#"{"hookSpecificOutput":{"hookEventName":"Notification"}}"#.utf8)
+            let responseData: Data
+            if pending.isFromPermission {
+                responseData = Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8)
+            } else {
+                responseData = Data(#"{"hookSpecificOutput":{"hookEventName":"Notification"}}"#.utf8)
+            }
+            pending.resolution.resumeHook(returning: responseData)
         }
-        pending.continuation.resume(returning: responseData)
         let sessionId = pending.event.sessionId ?? "default"
-        sessions[sessionId]?.status = .processing
+        resolveMergedSubagentAfterUI(
+            sessionId: sessionId,
+            agentId: pending.event.agentId,
+            subagentStatus: .processing,
+            keepSubagentTool: nil,
+            idleParentWhenNoAgent: false
+        )
 
         showNextPending()
         refreshDerivedState()
@@ -1789,13 +2164,16 @@ final class AppState {
     private func drainQuestions(forSession sessionId: String, reason: String = "unknown") {
         questionQueue.removeAll { item in
             guard item.event.sessionId == sessionId else { return false }
-            if item.isFromPermission {
+            if item.isCodexAppServer {
+                // Abandon the Codex app-server request so the server stops waiting.
+                item.resolveCodexAppServer(nil)
+            } else if item.isFromPermission {
                 log.notice("⚠️ permission deny reason=drainQuestions(\(reason, privacy: .public)) session=\(sessionId, privacy: .public) tool=AskUserQuestion")
                 let denyData = Data(
                     #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8)
-                item.continuation.resume(returning: denyData)
+                item.resolution.resumeHook(returning: denyData)
             } else {
-                item.continuation.resume(returning: Data("{}".utf8))
+                item.resolution.resumeHook(returning: Data("{}".utf8))
             }
             return true
         }
@@ -1810,14 +2188,16 @@ final class AppState {
             let sid = next.event.sessionId ?? "default"
             activeSessionId = sid
             // When the session list is open, keep it open; approvals can be handled inline.
-            if surface != .sessionList {
+            if surface != .sessionList, shouldAutoOpenPendingSurface(for: sid) {
                 surface = .approvalCard(sessionId: sid)
             }
             return true
         } else if let next = questionQueue.first {
             let sid = next.event.sessionId ?? "default"
             activeSessionId = sid
-            surface = .questionCard(sessionId: sid)
+            if shouldAutoOpenQuestionSurface(for: next.event) {
+                surface = .questionCard(sessionId: sid)
+            }
             return true
         } else if !completionQueue.isEmpty {
             while let next = completionQueue.first {
@@ -1866,8 +2246,7 @@ final class AppState {
     private nonisolated static func readModelFromTranscript(sessionId: String, cwd: String?) -> String? {
         guard let cwd = cwd else { return nil }
         let projectDir = cwd.claudeProjectDirEncoded()
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let path = "\(home)/.claude/projects/\(projectDir)/\(sessionId).jsonl"
+        let path = "\(ClaudeConfigPaths.projectsDir())/\(projectDir)/\(sessionId).jsonl"
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { handle.closeFile() }
         let chunk = handle.readData(ofLength: 32768)
@@ -1891,7 +2270,7 @@ final class AppState {
         switch source {
         case "claude":
             return readModelFromTranscript(sessionId: sessionId, cwd: session.cwd)
-        case "qoder":
+        case "qoder", "qoder-cli":
             return readModelFromProjectTranscript(
                 sessionId: sessionId,
                 cwd: session.cwd,
@@ -1919,7 +2298,7 @@ final class AppState {
             return readModelFromCodexStore(cwd: session.cwd, processStart: processStart)
         case "gemini":
             return readModelFromGeminiStore(cwd: session.cwd, processStart: processStart)
-        case "cursor":
+        case "cursor", "cursor-cli":
             return readModelFromCursorStore(cwd: session.cwd, processStart: processStart)
         case "copilot":
             return readModelFromCopilotStore(cwd: session.cwd, processStart: processStart)
@@ -2008,7 +2387,7 @@ final class AppState {
         switch session.source {
         case "codex":
             return codexLatestFinishedTurnTimestamp(sessionId: sessionId, session: session)
-        case "qoder":
+        case "qoder", "qoder-cli":
             return qoderLatestFinishedTurnTimestamp(sessionId: sessionId, session: session)
         case "codebuddy":
             return codeBuddyLatestFinishedTurnTimestamp(sessionId: sessionId, session: session)
@@ -2180,6 +2559,10 @@ final class AppState {
             snapshot.zellijSessionName = p.zellijSessionName
             snapshot.weztermPaneId = p.weztermPaneId
             snapshot.lastActivity = p.lastActivity
+            snapshot.transcriptPath = p.transcriptPath
+            if let closed = p.closedSubagentIds, !closed.isEmpty {
+                snapshot.closedSubagentIds = Set(closed)
+            }
             // Restore persisted cliPid only if the process is still alive — avoids
             // stale sessions reappearing briefly after the app or IDE restarts (#46).
             if let pid = p.cliPid, pid > 0 {
@@ -2196,21 +2579,48 @@ final class AppState {
                 removeSession(duplicateId)
             }
             // Skip sessions whose process is dead and status was idle — nothing to show.
-            if snapshot.cliPid == nil && snapshot.status == .idle && snapshot.lastUserPrompt == nil {
+            // Keep Cursor Task tombstones / foldable orphans so applyCursor… can still
+            // honor closedSubagentIds after relaunch (otherwise merge can revive them).
+            if snapshot.cliPid == nil && snapshot.status == .idle && snapshot.lastUserPrompt == nil,
+               !Self.shouldKeepRestoredIdleCursorSession(
+                source: source,
+                sessionId: p.sessionId,
+                providerSessionId: snapshot.providerSessionId,
+                transcriptPath: snapshot.transcriptPath,
+                closedSubagentIds: snapshot.closedSubagentIds
+               ) {
                 continue
             }
             sessions[p.sessionId] = snapshot
             refreshProviderTitle(for: p.sessionId)
+            // Branch is re-read, not persisted — it may have changed between runs.
+            maybeRefreshGitBranch(for: p.sessionId, cwdBefore: nil, normalizedEventName: "SessionStart")
             // Reattach exit monitoring without changing the restored idle/running snapshot.
             tryMonitorSession(p.sessionId)
         }
         SessionPersistence.clear()
         _ = applyCodexSubsessionModeToKnownSessions()
+        _ = applyCursorSubsessionModeToKnownSessions()
         if activeSessionId == nil {
             activeSessionId = sessions.first(where: { $0.value.status != .idle })?.key
                 ?? sessions.keys.sorted().first
         }
         refreshDerivedState()
+    }
+
+    /// Idle snapshots with no live process are usually discarded on restore.
+    /// Keep Cursor Task cards that carry a Stop tombstone so merge can still
+    /// honor `closedSubagentIds` after relaunch. A foldable transcript alone is
+    /// not enough — that would rehydrate finished Tasks when Stop was missed.
+    nonisolated static func shouldKeepRestoredIdleCursorSession(
+        source: String,
+        sessionId: String,
+        providerSessionId: String?,
+        transcriptPath: String?,
+        closedSubagentIds: Set<String>
+    ) -> Bool {
+        guard source == "cursor" || source == "cursor-cli" else { return false }
+        return !closedSubagentIds.isEmpty
     }
 
     private nonisolated static func findDiscoveredSessions() -> [DiscoveredSession] {
@@ -2255,7 +2665,7 @@ final class AppState {
     private nonisolated static func discoveryWatchRoots() -> [String] {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates: [(String, String)] = [
-            ("claude", "\(home)/.claude/projects"),
+            ("claude", ClaudeConfigPaths.projectsDir()),
             ("codex", "\(home)/.codex/sessions"),
             ("gemini", "\(home)/.gemini/tmp"),
             ("qoder", "\(home)/.qoder/projects"),
@@ -2264,6 +2674,7 @@ final class AppState {
             ("cursor", "\(home)/.cursor/projects"),
             ("copilot", "\(home)/.copilot/session-state"),
             ("opencode", "\(home)/.local/share/opencode"),
+            ("kimi", "\(home)/.kimi-code/sessions"),
             ("kimi", "\(home)/.kimi/sessions"),
         ]
         let fm = FileManager.default
@@ -2324,19 +2735,21 @@ final class AppState {
         let watchRoots = Self.discoveryWatchRoots()
         guard !watchRoots.isEmpty else { return }
 
+        let box = ProjectsWatcherBox()
+        box.appState = self
+
         var context = FSEventStreamContext()
-        // passUnretained is safe here: the stream is dispatched on .main (same as
-        // @MainActor), so callbacks cannot interleave with deinit. Both
-        // stopSessionDiscovery() and deinit stop/invalidate the stream synchronously
-        // on the main thread before self is deallocated.
-        context.info = Unmanaged.passUnretained(self).toOpaque()
+        // Unretained box is owned by `projectsWatcherBox` until
+        // `tearDownProjectsWatcher()`; the weak back-pointer keeps callbacks
+        // safe across off-main `AppState` deinit.
+        context.info = Unmanaged.passUnretained(box).toOpaque()
 
         let stream = FSEventStreamCreate(
             nil,
             { (_, info, _, _, _, _) in
                 guard let info = info else { return }
-                let appState = Unmanaged<AppState>.fromOpaque(info).takeUnretainedValue()
-                appState.handleProjectsDirChange()
+                let box = Unmanaged<ProjectsWatcherBox>.fromOpaque(info).takeUnretainedValue()
+                box.handleChange()
             },
             &context,
             watchRoots as CFArray,
@@ -2348,12 +2761,13 @@ final class AppState {
         guard let stream = stream else { return }
         FSEventStreamSetDispatchQueue(stream, .main)
         FSEventStreamStart(stream)
+        self.projectsWatcherBox = box
         self.fsEventStream = stream
         log.info("Discovery watcher started on \(watchRoots.joined(separator: ", "))")
     }
 
     /// Called by FSEventStream when a known session-store directory changes.
-    nonisolated private func handleProjectsDirChange() {
+    nonisolated fileprivate func handleProjectsDirChange() {
         Task { @MainActor [weak self] in
             guard let self = self else { return }
             // Debounce: skip if scanned within the last 3 seconds
@@ -2420,6 +2834,10 @@ final class AppState {
                 if backfillSessionMessages(sessionId: info.sessionId, from: info) {
                     didMutate = true
                 }
+                if sessions[info.sessionId]?.cwd != info.cwd {
+                    sessions[info.sessionId]?.cwd = info.cwd
+                    didMutate = true
+                }
                 if let path = info.transcriptPath, sessions[info.sessionId]?.transcriptPath != path {
                     sessions[info.sessionId]?.transcriptPath = path
                     didMutate = true
@@ -2473,6 +2891,10 @@ final class AppState {
                 if backfillSessionMessages(sessionId: existingKey, from: info) {
                     didMutate = true
                 }
+                if sessions[existingKey]?.cwd != info.cwd {
+                    sessions[existingKey]?.cwd = info.cwd
+                    didMutate = true
+                }
                 if let path = info.transcriptPath, sessions[existingKey]?.transcriptPath != path {
                     sessions[existingKey]?.transcriptPath = path
                     didMutate = true
@@ -2510,6 +2932,9 @@ final class AppState {
             didMutate = true
         }
         if applyCodexSubsessionModeToKnownSessions() {
+            didMutate = true
+        }
+        if applyCursorSubsessionModeToKnownSessions() {
             didMutate = true
         }
         if didMutate && activeSessionId == nil {
@@ -2592,6 +3017,272 @@ final class AppState {
         return didMutate
     }
 
+    /// Apply Agent Sub-Sessions to known Cursor Task/subagent cards
+    /// (`transcriptPath` is the parent chat; `session_id` is the child).
+    /// `merge` / `hide` only; `separate` is handled by `separateMergedCursorSubagents()`.
+    @discardableResult
+    func applyCursorSubsessionModeToKnownSessions() -> Bool {
+        let mode = Self.currentPluginSessionMode()
+        guard mode == "hide" || mode == "merge" else {
+            return false
+        }
+
+        let candidates = sessions.map { (sessionId: $0.key, session: $0.value) }
+        var didMutate = false
+
+        if mode == "hide" {
+            for candidate in candidates {
+                let source = candidate.session.source
+                guard source == "cursor" || source == "cursor-cli" else { continue }
+                guard cursorFoldIdentity(for: candidate) != nil else { continue }
+                if sessions[candidate.sessionId] != nil {
+                    removeSession(candidate.sessionId)
+                    didMutate = true
+                }
+            }
+            return hideMergedCursorSubagents() || didMutate
+        }
+
+        for candidate in candidates {
+            let source = candidate.session.source
+            guard source == "cursor" || source == "cursor-cli" else { continue }
+            guard let fold = cursorFoldIdentity(for: candidate) else { continue }
+            let parentId = fold.parentId
+            let childId = fold.childId
+
+            // If fold identity collides with this card, prefer the real parent id
+            // (child wrongly reused the parent's providerSessionId).
+            var parentKey = findSessionId(providerSessionId: parentId) ?? parentId
+            if parentKey == candidate.sessionId {
+                parentKey = parentId
+            }
+            if parentKey == candidate.sessionId { continue }
+
+            // Closed ids may sit on the parent (merge Stop) or the child card
+            // (separate Stop). Parent tombstone always wins over a late-running
+            // orphan card — relaunch clears via UserPromptSubmit on the hook path.
+            let childClosed = candidate.session.closedSubagentIds
+            let candidateCarriesClosed = childClosed.contains(childId)
+                || childClosed.contains(candidate.sessionId)
+            let parentHoldsTombstone = sessions[parentKey]?.closedSubagentIds.contains(childId) == true
+
+            if candidateCarriesClosed || parentHoldsTombstone {
+                if sessions[parentKey] == nil {
+                    var parent = SessionSnapshot(startTime: candidate.session.startTime)
+                    parent.source = source
+                    parent.cwd = candidate.session.cwd
+                    parent.model = candidate.session.model
+                    parent.termApp = candidate.session.termApp
+                    parent.termBundleId = candidate.session.termBundleId
+                    parent.transcriptPath = candidate.session.transcriptPath
+                    parent.providerSessionId = parentId
+                    // Closed ids only — parent is not actively working.
+                    parent.status = .idle
+                    parent.lastActivity = candidate.session.lastActivity
+                    sessions[parentKey] = parent
+                }
+                promoteCursorClosedIds(
+                    onto: parentKey,
+                    childId: childId,
+                    candidateSessionId: candidate.sessionId,
+                    childClosed: childClosed
+                )
+                if sessions[candidate.sessionId] != nil {
+                    removeSession(candidate.sessionId)
+                    didMutate = true
+                }
+                continue
+            }
+
+            // Idle orphan: always drop — never overwrite a live merged Task slot
+            // with an AfterAgentResponse→idle discovery card. Tombstones were
+            // already handled above; plain idle must not invent parents either.
+            if candidate.session.status == .idle {
+                if sessions[candidate.sessionId] != nil {
+                    removeSession(candidate.sessionId)
+                    didMutate = true
+                }
+                continue
+            }
+
+            if sessions[parentKey] == nil {
+                var parent = SessionSnapshot(startTime: candidate.session.startTime)
+                parent.source = source
+                parent.cwd = candidate.session.cwd
+                parent.model = candidate.session.model
+                parent.termApp = candidate.session.termApp
+                parent.termBundleId = candidate.session.termBundleId
+                parent.transcriptPath = candidate.session.transcriptPath
+                // Do not copy the Task/subagent process identity onto the parent chat.
+                parent.providerSessionId = parentId
+                parent.status = candidate.session.status == .idle ? .processing : candidate.session.status
+                parent.lastActivity = candidate.session.lastActivity
+                sessions[parentKey] = parent
+            } else if sessions[parentKey]?.transcriptPath == nil,
+                      let path = candidate.session.transcriptPath {
+                sessions[parentKey]?.transcriptPath = path
+            }
+
+            if sessions[candidate.sessionId] != nil {
+                removeSession(candidate.sessionId)
+                didMutate = true
+            }
+
+            // Prefer an existing parent monitor; skip if we only synthesized metadata.
+            if sessions[parentKey]?.cliPid != nil || sessions[parentKey]?.transcriptPath != nil {
+                if sessions[parentKey]?.transcriptPath != nil {
+                    attachTranscriptTailerIfNeeded(sessionId: parentKey)
+                }
+                if sessions[parentKey]?.cliPid != nil {
+                    tryMonitorSession(parentKey)
+                }
+            }
+
+            var subagent = sessions[parentKey]?.subagents[childId]
+                ?? SubagentState(agentId: childId, agentType: "cursor-subagent")
+            subagent.status = candidate.session.status
+            subagent.currentTool = candidate.session.currentTool
+            subagent.toolDescription = candidate.session.toolDescription
+            if candidate.session.lastActivity > subagent.lastActivity {
+                subagent.lastActivity = candidate.session.lastActivity
+            }
+            sessions[parentKey]?.subagents[childId] = subagent
+
+            if sessions[parentKey]?.status != .waitingApproval
+                && sessions[parentKey]?.status != .waitingQuestion {
+                sessions[parentKey]?.status = .running
+                if sessions[parentKey]?.currentTool == nil {
+                    sessions[parentKey]?.currentTool = "Agent"
+                    sessions[parentKey]?.toolDescription = "cursor-subagent"
+                }
+            }
+            if candidate.session.lastActivity > (sessions[parentKey]?.lastActivity ?? .distantPast) {
+                sessions[parentKey]?.lastActivity = candidate.session.lastActivity
+            }
+            activeSessionId = parentKey
+            didMutate = true
+        }
+
+        return didMutate
+    }
+
+    /// Record the foldable child id(s) on the parent — not an arbitrary union of
+    /// whatever closed set the orphan card carried.
+    private func promoteCursorClosedIds(
+        onto parentKey: String,
+        childId: String,
+        candidateSessionId: String,
+        childClosed: Set<String>
+    ) {
+        sessions[parentKey]?.closedSubagentIds.insert(childId)
+        if candidateSessionId != childId {
+            sessions[parentKey]?.closedSubagentIds.insert(candidateSessionId)
+        }
+        for id in childClosed where id == childId || id == candidateSessionId {
+            sessions[parentKey]?.closedSubagentIds.insert(id)
+        }
+    }
+
+    private func markMergedSubagentWaiting(
+        sessionId: String,
+        agentId: String?,
+        status: AgentStatus
+    ) {
+        guard let agentId else { return }
+        guard var session = sessions[sessionId] else { return }
+        var subagent = session.subagents[agentId]
+            ?? SubagentState(agentId: agentId, agentType: "cursor-subagent")
+        subagent.status = status
+        subagent.lastActivity = Date()
+        session.subagents[agentId] = subagent
+        sessions[sessionId] = session
+    }
+
+    /// After Permission/Question UI resolves for a possibly folded Task.
+    /// With `agent_id`, never idle the parent — even if the subagent slot was
+    /// already removed (Stop race). Uses local copies to avoid exclusivity traps
+    /// when mutating nested `sessions[id].subagents[id]` fields.
+    private func resolveMergedSubagentAfterUI(
+        sessionId: String,
+        agentId: String?,
+        subagentStatus: AgentStatus,
+        keepSubagentTool: String?,
+        idleParentWhenNoAgent: Bool
+    ) {
+        if let agentId {
+            guard var session = sessions[sessionId] else { return }
+            if var subagent = session.subagents[agentId] {
+                subagent.status = subagentStatus
+                if subagentStatus == .processing {
+                    subagent.currentTool = nil
+                    subagent.toolDescription = nil
+                } else if let keepSubagentTool {
+                    subagent.currentTool = keepSubagentTool
+                }
+                session.subagents[agentId] = subagent
+            }
+            let hasNonIdleSubagents = session.subagents.values.contains { $0.status != .idle }
+            if hasNonIdleSubagents {
+                let agentType = session.subagents[agentId]?.agentType ?? "cursor-subagent"
+                session.status = .running
+                session.currentTool = "Agent"
+                if session.toolDescription == nil {
+                    session.toolDescription = agentType
+                }
+            } else {
+                session.status = .processing
+                session.currentTool = nil
+                session.toolDescription = nil
+            }
+            sessions[sessionId] = session
+            return
+        }
+
+        if idleParentWhenNoAgent {
+            sessions[sessionId]?.status = .idle
+            sessions[sessionId]?.currentTool = nil
+            sessions[sessionId]?.toolDescription = nil
+        } else {
+            sessions[sessionId]?.status = .processing
+            sessions[sessionId]?.currentTool = nil
+            sessions[sessionId]?.toolDescription = nil
+        }
+    }
+
+    /// Suppress Permission/Question UI for Stop'd Tasks: merged `agent_id` tombstones
+    /// or separate-mode self-tombstones (`closedSubagentIds` contains the card id).
+    private func shouldSuppressClosedSubagentUI(sessionId: String, agentId: String?) -> Bool {
+        let closed = sessions[sessionId]?.closedSubagentIds ?? []
+        if let agentId, closed.contains(agentId) { return true }
+        if agentId == nil, closed.contains(sessionId) { return true }
+        return false
+    }
+
+    /// Parent/child ids when this card's transcript belongs to another Cursor chat.
+    private func cursorFoldIdentity(
+        for candidate: (sessionId: String, session: SessionSnapshot)
+    ) -> (parentId: String, childId: String)? {
+        // Prefer providerSessionId if it folds; else the card key (used as agent_id).
+        let primaryId = candidate.session.providerSessionId ?? candidate.sessionId
+        let parentFromPrimary = CursorSessionFolding.foldTarget(
+            childSessionId: primaryId,
+            transcriptPath: candidate.session.transcriptPath
+        )
+        let parentFromCard = candidate.sessionId == primaryId
+            ? nil
+            : CursorSessionFolding.foldTarget(
+                childSessionId: candidate.sessionId,
+                transcriptPath: candidate.session.transcriptPath
+            )
+        if let parentFromPrimary {
+            return (parentFromPrimary, primaryId)
+        }
+        if let parentFromCard {
+            return (parentFromCard, candidate.sessionId)
+        }
+        return nil
+    }
+
     func applyCurrentPluginSessionMode(persist: Bool = true) {
         let mode = Self.currentPluginSessionMode()
         var didMutate = false
@@ -2599,11 +3290,14 @@ final class AppState {
         switch mode {
         case "separate":
             didMutate = separateMergedCodexSubagents()
+            didMutate = separateMergedCursorSubagents() || didMutate
         case "merge":
             didMutate = applyCodexSubsessionModeToKnownSessions()
+            didMutate = applyCursorSubsessionModeToKnownSessions() || didMutate
         case "hide":
             didMutate = applyCodexSubsessionModeToKnownSessions()
             didMutate = hideMergedCodexSubagents() || didMutate
+            didMutate = applyCursorSubsessionModeToKnownSessions() || didMutate
         default:
             return
         }
@@ -2641,6 +3335,8 @@ final class AppState {
                 child.tmuxClientTty = child.tmuxClientTty ?? parent.session.tmuxClientTty
                 child.tmuxEnv = child.tmuxEnv ?? parent.session.tmuxEnv
                 child.termBundleId = child.termBundleId ?? parent.session.termBundleId
+                child.remoteHostId = child.remoteHostId ?? parent.session.remoteHostId
+                child.remoteHostName = child.remoteHostName ?? parent.session.remoteHostName
                 child.cliPid = child.cliPid ?? parent.session.cliPid
                 child.cliStartTime = child.cliStartTime ?? parent.session.cliStartTime
                 child.status = subagent.status
@@ -2691,6 +3387,94 @@ final class AppState {
     private func hideMergedCodexSubagents() -> Bool {
         var didMutate = false
         for (sessionId, session) in sessions where session.source == "codex" && !session.subagents.isEmpty {
+            sessions[sessionId]?.subagents.removeAll()
+            clearSubagentProjection(fromParentSession: sessionId)
+            didMutate = true
+        }
+        return didMutate
+    }
+
+    /// Split Cursor parent.subagents into standalone cards (Agent Sub-Sessions: separate).
+    @discardableResult
+    private func separateMergedCursorSubagents() -> Bool {
+        let parentCandidates = sessions.map { (sessionId: $0.key, session: $0.value) }
+        var didMutate = false
+
+        for parent in parentCandidates
+        where (parent.session.source == "cursor" || parent.session.source == "cursor-cli")
+            && !parent.session.subagents.isEmpty {
+            for (agentId, subagent) in parent.session.subagents {
+                let childKey = findSessionId(providerSessionId: agentId) ?? agentId
+                guard childKey != parent.sessionId else { continue }
+
+                var child = sessions[childKey] ?? SessionSnapshot(startTime: subagent.startTime)
+                child.source = parent.session.source
+                child.providerSessionId = agentId
+                child.cwd = child.cwd ?? parent.session.cwd
+                child.model = child.model ?? parent.session.model
+                child.permissionMode = child.permissionMode ?? parent.session.permissionMode
+                child.termApp = child.termApp ?? parent.session.termApp
+                child.itermSessionId = child.itermSessionId ?? parent.session.itermSessionId
+                child.ttyPath = child.ttyPath ?? parent.session.ttyPath
+                child.kittyWindowId = child.kittyWindowId ?? parent.session.kittyWindowId
+                child.tmuxPane = child.tmuxPane ?? parent.session.tmuxPane
+                child.tmuxClientTty = child.tmuxClientTty ?? parent.session.tmuxClientTty
+                child.tmuxEnv = child.tmuxEnv ?? parent.session.tmuxEnv
+                child.termBundleId = child.termBundleId ?? parent.session.termBundleId
+                child.cmuxSurfaceId = child.cmuxSurfaceId ?? parent.session.cmuxSurfaceId
+                child.cmuxWorkspaceId = child.cmuxWorkspaceId ?? parent.session.cmuxWorkspaceId
+                child.zellijPaneId = child.zellijPaneId ?? parent.session.zellijPaneId
+                child.zellijSessionName = child.zellijSessionName ?? parent.session.zellijSessionName
+                child.weztermPaneId = child.weztermPaneId ?? parent.session.weztermPaneId
+                child.remoteHostId = child.remoteHostId ?? parent.session.remoteHostId
+                child.remoteHostName = child.remoteHostName ?? parent.session.remoteHostName
+                // Keep the child's own process identity only — the parent Cursor chat
+                // often shares the IDE process, which must not be attributed to Tasks.
+                child.status = subagent.status
+                child.currentTool = subagent.currentTool
+                child.toolDescription = subagent.toolDescription ?? subagent.agentType
+                child.lastActivity = subagent.lastActivity
+                if child.sessionTitle == nil {
+                    child.sessionTitle = subagent.toolDescription ?? subagent.agentType
+                }
+                // Keep parent transcriptPath for later fold identity, but do not
+                // attach a second JSONLTailer on the same parent file (steals the
+                // parent's live tail). Prefer a child-specific path when present.
+                let parentTranscript = parent.session.transcriptPath
+                if child.transcriptPath == nil {
+                    child.transcriptPath = parentTranscript
+                }
+                let shouldTailChildTranscript =
+                    child.transcriptPath != nil && child.transcriptPath != parentTranscript
+
+                sessions[childKey] = child
+                refreshProviderTitle(for: childKey, providerSessionId: agentId)
+                if shouldTailChildTranscript {
+                    attachTranscriptTailerIfNeeded(sessionId: childKey)
+                }
+                if child.cliPid != nil {
+                    tryMonitorSession(childKey)
+                }
+                sessions[parent.sessionId]?.subagents.removeValue(forKey: agentId)
+                if subagent.status != .idle {
+                    activeSessionId = childKey
+                }
+                didMutate = true
+            }
+            if sessions[parent.sessionId]?.subagents.isEmpty == true {
+                clearSubagentProjection(fromParentSession: parent.sessionId)
+            }
+        }
+
+        return didMutate
+    }
+
+    /// Clear Cursor parent.subagents (Agent Sub-Sessions: hide).
+    @discardableResult
+    private func hideMergedCursorSubagents() -> Bool {
+        var didMutate = false
+        for (sessionId, session) in sessions
+        where (session.source == "cursor" || session.source == "cursor-cli") && !session.subagents.isEmpty {
             sessions[sessionId]?.subagents.removeAll()
             clearSubagentProjection(fromParentSession: sessionId)
             didMutate = true
@@ -2758,12 +3542,7 @@ final class AppState {
     }
 
     func stopSessionDiscovery() {
-        if let stream = fsEventStream {
-            FSEventStreamStop(stream)
-            FSEventStreamInvalidate(stream)
-            FSEventStreamRelease(stream)
-            fsEventStream = nil
-        }
+        tearDownProjectsWatcher()
         cleanupTimer?.invalidate()
         cleanupTimer = nil
         saveTimer?.invalidate()
@@ -2774,20 +3553,45 @@ final class AppState {
         for key in Array(processMonitors.keys) { stopMonitor(key) }
     }
 
-    deinit {
-        MainActor.assumeIsolated {
-            rotationTimer?.invalidate()
-            cleanupTimer?.invalidate()
-            saveTimer?.invalidate()
+    /// Stops the FSEvents watcher on the main queue so Stop/Invalidate cannot
+    /// race a queued callback. Safe to call from `deinit` (any thread).
+    nonisolated private func tearDownProjectsWatcher() {
+        let teardown = { [self] in
+            // Flip cancel before stopping so any already-queued callback no-ops
+            // instead of touching a dying AppState / freed box.
+            projectsWatcherBox?.cancel()
             if let stream = fsEventStream {
                 FSEventStreamStop(stream)
                 FSEventStreamInvalidate(stream)
                 FSEventStreamRelease(stream)
+                fsEventStream = nil
             }
-            discoveryScanTask?.cancel()
-            for (_, monitor) in processMonitors {
-                monitor.source.cancel()
+            let box = projectsWatcherBox
+            projectsWatcherBox = nil
+            // Keep the box alive until after previously queued main-queue
+            // callbacks drain (Invalidate does not flush them).
+            if let box {
+                DispatchQueue.main.async { _ = box }
             }
+        }
+        if Thread.isMainThread {
+            teardown()
+        } else {
+            DispatchQueue.main.sync(execute: teardown)
+        }
+    }
+
+    deinit {
+        // Must not use MainActor.assumeIsolated: async callers (notably XCTest)
+        // can release AppState off the main actor via ARC. Weak-boxed FSEvents
+        // + main-synced stream teardown keep discovery teardown crash-free.
+        rotationTimer?.invalidate()
+        cleanupTimer?.invalidate()
+        saveTimer?.invalidate()
+        tearDownProjectsWatcher()
+        discoveryScanTask?.cancel()
+        for (_, monitor) in processMonitors {
+            monitor.source.cancel()
         }
     }
 
@@ -2816,8 +3620,8 @@ final class AppState {
         let claudePids = findClaudePids(candidatePids: candidatePids)
         guard !claudePids.isEmpty else { return [] }
 
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
         let fm = FileManager.default
+        let claudeProjects = ClaudeConfigPaths.projectsDir()
         var results: [DiscoveredSession] = []
         var seenSessionIds: Set<String> = []
 
@@ -2834,7 +3638,7 @@ final class AppState {
             let processStart = getProcessStartTime(pid)
 
             let projectDir = cwd.claudeProjectDirEncoded()
-            let projectPath = "\(home)/.claude/projects/\(projectDir)"
+            let projectPath = "\(claudeProjects)/\(projectDir)"
             guard let files = try? fm.contentsOfDirectory(atPath: projectPath) else { continue }
 
             // Find the most recently modified .jsonl that was written AFTER this process started
@@ -2965,12 +3769,53 @@ final class AppState {
         )
     }
 
+    /// Standalone Cursor CLI agent — must not match the desktop IDE/helper
+    /// processes that `findCursorPids` also covers (#248).
+    private nonisolated static func findCursorCliPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/.local/share/cursor-agent/versions/",
+            ],
+            argSubstrings: ["/cursor-agent/index.js"],
+            candidatePids: candidatePids
+        )
+    }
+
     private nonisolated static func findQoderPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
         findPids(
             matchingPathSubstrings: [
                 "/qoder.app/contents/macos/electron",
                 "/qoder.app/contents/frameworks/qoder helper",
                 "/.qoder/bin/qodercli/",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
+    /// Standalone Qoder CLI — must not match the desktop IDE/helper (#248).
+    private nonisolated static func findQoderCliPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/.qoder/bin/qodercli/",
+                "/@qoder-ai/qodercli",
+            ],
+            argSubstrings: [
+                "/opt/homebrew/bin/qodercli",
+                "/usr/local/bin/qodercli",
+                "/.local/bin/qodercli",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
+    /// QoderWork desktop app (#249). Bundle layout is assumed from the standard
+    /// /Applications/QoderWork.app install — no public bundle id / binary name
+    /// docs, pending real-install verification. "/qoderwork.app/" never collides
+    /// with the IDE's "/qoder.app/" substrings.
+    private nonisolated static func findQoderWorkPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/qoderwork.app/contents/",
             ],
             candidatePids: candidatePids
         )
@@ -3102,6 +3947,27 @@ final class AppState {
         )
     }
 
+    /// Google Antigravity (Gemini-based IDE/CLI, #215). The actionable agent is the
+    /// `agy` CLI (pypi google-antigravity) launched from the IDE's integrated
+    /// terminal; the IDE itself is Antigravity.app (com.google.antigravity).
+    /// We match the IDE app *only* via the Google-specific .app path component to
+    /// avoid colliding with the existing "antigravity" Claude-fork CLI (which lives
+    /// under ~/.antigravity, never in an .app named exactly "antigravity").
+    private nonisolated static func findGoogleAntigravityPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/antigravity.app/contents/macos/",
+                "/bin/agy",
+            ],
+            argSubstrings: [
+                "/google-antigravity/",
+                "/antigravity-cli/",
+                "/bin/agy",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
     private nonisolated static func findWorkBuddyPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
         findPids(
             matchingPathSubstrings: [
@@ -3131,6 +3997,17 @@ final class AppState {
         )
     }
 
+    // Electron app (.dmg distribution) — packaged executable path unverified
+    // on a real machine; best-effort guess pending field report (#245).
+    private nonisolated static func findZcodePids(candidatePids: [pid_t]? = nil) -> [pid_t] {
+        findPids(
+            matchingPathSubstrings: [
+                "/zcode.app/contents/",
+            ],
+            candidatePids: candidatePids
+        )
+    }
+
     private nonisolated static func findQwenPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
         findPids(
             matchingPathSubstrings: [
@@ -3148,12 +4025,14 @@ final class AppState {
     private nonisolated static func findKimiPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
         findPids(
             matchingPathSubstrings: [
+                "/.kimi-code/bin/kimi",
                 "/.local/bin/kimi",
                 "/.local/share/uv/tools/kimi-cli/",
             ],
             argSubstrings: [
                 "/kimi-cli/",
                 "kimi_cli",
+                "/.kimi-code/",
             ],
             candidatePids: candidatePids
         )
@@ -3163,10 +4042,14 @@ final class AppState {
         findPids(
             matchingPathSubstrings: [
                 "/pi-coding-agent/",
+                "/.local/bin/pi",
+                "/.local/bin/omp",
                 "/bin/pi",
+                "/bin/omp",
             ],
             argSubstrings: [
                 "pi-coding-agent",
+                "/.local/bin/omp",
             ],
             candidatePids: candidatePids
         )
@@ -3183,8 +4066,10 @@ final class AppState {
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let fm = FileManager.default
-        let sessionsBase = "\(home)/.kimi/sessions"
-        guard fm.fileExists(atPath: sessionsBase) else { return [] }
+        // Legacy kimi-cli hashes cwd under sessions/; kimi-code may only need
+        // session_index.jsonl, so do not bail when these dirs are absent.
+        let sessionsBases = ["\(home)/.kimi-code/sessions", "\(home)/.kimi/sessions"]
+            .filter { fm.fileExists(atPath: $0) }
 
         var results: [DiscoveredSession] = []
         var seenSessionIds: Set<String> = []
@@ -3192,53 +4077,135 @@ final class AppState {
         for pid in kimiPids {
             guard let cwd = getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else { continue }
             let processStart = getProcessStartTime(pid)
-            let workdirHash = md5Hash(of: cwd)
-            let workdirPath = "\(sessionsBase)/\(workdirHash)"
-            guard fm.fileExists(atPath: workdirPath),
-                  let sessionDirs = try? fm.contentsOfDirectory(atPath: workdirPath) else { continue }
 
-            var bestPath: String?
-            var bestDate = Date.distantPast
-            var bestSessionId: String?
-
-            for sessionId in sessionDirs {
-                let wirePath = "\(workdirPath)/\(sessionId)/wire.jsonl"
-                guard fm.fileExists(atPath: wirePath),
-                      let attrs = try? fm.attributesOfItem(atPath: wirePath),
-                      let modified = attrs[.modificationDate] as? Date,
-                      modified > bestDate else { continue }
-                if let start = processStart, modified < start.addingTimeInterval(-10) {
-                    continue
-                }
-                bestPath = wirePath
-                bestDate = modified
-                bestSessionId = sessionId
+            // Prefer kimi-code session_index.jsonl (workDir → sessionDir mapping).
+            if let indexed = discoverKimiCodeSessionFromIndex(
+                home: home,
+                cwd: cwd,
+                pid: pid,
+                processStart: processStart,
+                fm: fm
+            ), !seenSessionIds.contains(indexed.sessionId) {
+                seenSessionIds.insert(indexed.sessionId)
+                results.append(indexed)
+                continue
             }
 
-            guard let path = bestPath, let sessionId = bestSessionId else { continue }
-            let freshnessLimit: TimeInterval = processStart != nil ? -300 : -30
-            if bestDate.timeIntervalSinceNow < freshnessLimit { continue }
+            // Legacy kimi-cli: ~/.kimi/sessions/<md5(cwd)>/<sessionId>/wire.jsonl
+            let workdirHash = md5Hash(of: cwd)
+            for sessionsBase in sessionsBases {
+                let workdirPath = "\(sessionsBase)/\(workdirHash)"
+                guard fm.fileExists(atPath: workdirPath),
+                      let sessionDirs = try? fm.contentsOfDirectory(atPath: workdirPath) else { continue }
 
-            let (_, messages) = readRecentFromKimiTranscript(path: path)
-            guard !seenSessionIds.contains(sessionId) else { continue }
-            seenSessionIds.insert(sessionId)
+                var bestPath: String?
+                var bestDate = Date.distantPast
+                var bestSessionId: String?
 
-            results.append(DiscoveredSession(
-                sessionId: sessionId,
-                cwd: cwd,
-                tty: nil,
-                model: nil,
-                pid: pid,
-                modifiedAt: bestDate,
-                recentMessages: messages,
-                source: "kimi"
-            ))
+                for sessionId in sessionDirs {
+                    let wirePath = "\(workdirPath)/\(sessionId)/wire.jsonl"
+                    guard fm.fileExists(atPath: wirePath),
+                          let attrs = try? fm.attributesOfItem(atPath: wirePath),
+                          let modified = attrs[.modificationDate] as? Date,
+                          modified > bestDate else { continue }
+                    if let start = processStart, modified < start.addingTimeInterval(-10) {
+                        continue
+                    }
+                    bestPath = wirePath
+                    bestDate = modified
+                    bestSessionId = sessionId
+                }
+
+                guard let path = bestPath, let sessionId = bestSessionId else { continue }
+                let freshnessLimit: TimeInterval = processStart != nil ? -300 : -30
+                if bestDate.timeIntervalSinceNow < freshnessLimit { continue }
+
+                let (_, messages) = readRecentFromKimiTranscript(path: path)
+                guard !seenSessionIds.contains(sessionId) else { continue }
+                seenSessionIds.insert(sessionId)
+
+                results.append(DiscoveredSession(
+                    sessionId: sessionId,
+                    cwd: cwd,
+                    tty: nil,
+                    model: nil,
+                    pid: pid,
+                    modifiedAt: bestDate,
+                    recentMessages: messages,
+                    source: "kimi"
+                ))
+                break
+            }
         }
 
         return results
     }
 
-    private nonisolated static func readRecentFromKimiTranscript(path: String) -> (String?, [ChatMessage]) {
+    /// kimi-code tracks sessions in `~/.kimi-code/session_index.jsonl` with
+    /// `{ sessionId, sessionDir, workDir }` — workdir folders are no longer md5(cwd).
+    private nonisolated static func discoverKimiCodeSessionFromIndex(
+        home: String,
+        cwd: String,
+        pid: pid_t,
+        processStart: Date?,
+        fm: FileManager
+    ) -> DiscoveredSession? {
+        let indexPath = "\(home)/.kimi-code/session_index.jsonl"
+        guard fm.fileExists(atPath: indexPath),
+              let data = fm.contents(atPath: indexPath),
+              let text = String(data: data, encoding: .utf8) else { return nil }
+
+        var best: (sessionId: String, sessionDir: String, modified: Date)?
+        for line in text.components(separatedBy: "\n") where !line.isEmpty {
+            guard let lineData = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let workDir = json["workDir"] as? String,
+                  workDir == cwd,
+                  let sessionId = json["sessionId"] as? String,
+                  let sessionDir = json["sessionDir"] as? String
+            else { continue }
+
+            let statePath = "\(sessionDir)/state.json"
+            let stampPath = fm.fileExists(atPath: statePath) ? statePath : sessionDir
+            guard let attrs = try? fm.attributesOfItem(atPath: stampPath),
+                  let modified = attrs[.modificationDate] as? Date else { continue }
+            if let start = processStart, modified < start.addingTimeInterval(-10) {
+                continue
+            }
+            if best == nil || modified > best!.modified {
+                best = (sessionId, sessionDir, modified)
+            }
+        }
+
+        guard let match = best else { return nil }
+        let freshnessLimit: TimeInterval = processStart != nil ? -300 : -30
+        if match.modified.timeIntervalSinceNow < freshnessLimit { return nil }
+
+        // kimi-code keeps the transcript under agents/main/wire.jsonl.
+        let wirePath = "\(match.sessionDir)/agents/main/wire.jsonl"
+        let messages: [ChatMessage]
+        if fm.fileExists(atPath: wirePath) {
+            messages = readRecentFromKimiTranscript(path: wirePath).1
+        } else {
+            messages = []
+        }
+
+        return DiscoveredSession(
+            sessionId: match.sessionId,
+            cwd: cwd,
+            tty: nil,
+            model: nil,
+            pid: pid,
+            modifiedAt: match.modified,
+            recentMessages: messages,
+            source: "kimi"
+        )
+    }
+
+    /// Parse recent chat turns from a Kimi wire.jsonl transcript.
+    /// Supports legacy kimi-cli (`message.type = TurnBegin|ContentPart|TurnEnd`)
+    /// and kimi-code (`turn.prompt` / `context.append_message` / `content.part`).
+    internal nonisolated static func readRecentFromKimiTranscript(path: String) -> (String?, [ChatMessage]) {
         guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, []) }
         defer { handle.closeFile() }
 
@@ -3252,59 +4219,91 @@ final class AppState {
         var previousUserText: String?
         var previousAssistantText: String = ""
 
+        func flushTurn() {
+            if let userText = previousUserText, !userText.isEmpty {
+                messages.append(ChatMessage(isUser: true, text: userText))
+                if !previousAssistantText.isEmpty {
+                    messages.append(ChatMessage(isUser: false, text: previousAssistantText))
+                }
+            }
+            previousUserText = nil
+            previousAssistantText = ""
+        }
+
+        func textParts(from value: Any?) -> String {
+            let parts: [[String: Any]]
+            if let typed = value as? [[String: Any]] {
+                parts = typed
+            } else if let anyParts = value as? [Any] {
+                parts = anyParts.compactMap { $0 as? [String: Any] }
+            } else {
+                return ""
+            }
+            return parts.compactMap { part -> String? in
+                if let type = part["type"] as? String, type != "text" { return nil }
+                return part["text"] as? String
+            }.joined()
+        }
+
         for line in text.components(separatedBy: "\n") where !line.isEmpty {
             guard let lineData = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                  let message = json["message"] as? [String: Any],
-                  let type = message["type"] as? String
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
             else { continue }
 
-            switch type {
-            case "TurnBegin":
-                if let userText = previousUserText, !userText.isEmpty {
-                    messages.append(ChatMessage(isUser: true, text: userText))
-                    if !previousAssistantText.isEmpty {
-                        messages.append(ChatMessage(isUser: false, text: previousAssistantText))
+            // Legacy kimi-cli envelope: { "message": { "type": "TurnBegin"|... } }
+            if let message = json["message"] as? [String: Any],
+               let type = message["type"] as? String {
+                switch type {
+                case "TurnBegin":
+                    flushTurn()
+                    if let payload = message["payload"] as? [String: Any] {
+                        previousUserText = textParts(from: payload["user_input"])
+                    }
+                case "ContentPart":
+                    if let payload = message["payload"] as? [String: Any],
+                       payload["type"] as? String == "text",
+                       let textContent = payload["text"] as? String {
+                        previousAssistantText += textContent
+                    }
+                case "TurnEnd":
+                    flushTurn()
+                default:
+                    break
+                }
+                continue
+            }
+
+            // kimi-code wire protocol (v1.4+).
+            switch json["type"] as? String {
+            case "turn.prompt":
+                flushTurn()
+                previousUserText = textParts(from: json["input"])
+            case "context.append_message":
+                if let message = json["message"] as? [String: Any],
+                   message["role"] as? String == "user" {
+                    let userText = textParts(from: message["content"])
+                    if !userText.isEmpty {
+                        // Prefer turn.prompt when both exist for the same turn;
+                        // only start a turn here if we don't already have one open.
+                        if previousUserText == nil {
+                            previousUserText = userText
+                        }
                     }
                 }
-                previousUserText = nil
-                previousAssistantText = ""
-                if let payload = message["payload"] as? [String: Any],
-                   let userInput = payload["user_input"] as? [[String: Any]] {
-                    let texts = userInput.compactMap { part -> String? in
-                        guard part["type"] as? String == "text" else { return nil }
-                        return part["text"] as? String
-                    }
-                    previousUserText = texts.joined()
-                }
-            case "ContentPart":
-                if let payload = message["payload"] as? [String: Any],
-                   payload["type"] as? String == "text",
-                   let textContent = payload["text"] as? String {
+            case "context.append_loop_event":
+                if let event = json["event"] as? [String: Any],
+                   event["type"] as? String == "content.part",
+                   let part = event["part"] as? [String: Any],
+                   part["type"] as? String == "text",
+                   let textContent = part["text"] as? String {
                     previousAssistantText += textContent
                 }
-            case "TurnEnd":
-                if let userText = previousUserText, !userText.isEmpty {
-                    messages.append(ChatMessage(isUser: true, text: userText))
-                    if !previousAssistantText.isEmpty {
-                        messages.append(ChatMessage(isUser: false, text: previousAssistantText))
-                    }
-                }
-                previousUserText = nil
-                previousAssistantText = ""
             default:
                 break
             }
         }
 
-        // flush final turn
-        if let userText = previousUserText, !userText.isEmpty {
-            messages.append(ChatMessage(isUser: true, text: userText))
-            if !previousAssistantText.isEmpty {
-                messages.append(ChatMessage(isUser: false, text: previousAssistantText))
-            }
-        }
-
+        flushTurn()
         return (nil, Array(messages.suffix(3)))
     }
 
@@ -3624,7 +4623,8 @@ final class AppState {
                 pid: pid,
                 modifiedAt: best.modified,
                 recentMessages: messages,
-                source: "cursor"
+                source: "cursor",
+                transcriptPath: best.path
             ))
         }
 
@@ -4024,6 +5024,49 @@ final class AppState {
 
     /// Find running Codex processes.
     /// Checks both executable path (Desktop app) and command-line args (npm/Homebrew: node script).
+    nonisolated static func isCodexExecutablePath(_ path: String) -> Bool {
+        let executableURL = URL(fileURLWithPath: path).standardizedFileURL
+        let lowerPath = executableURL.path.lowercased()
+        let resourceSuffix = "/contents/resources/codex"
+        guard lowerPath.hasSuffix(resourceSuffix) else { return false }
+
+        // Since Codex was folded into ChatGPT Desktop, the same com.openai.codex
+        // bundle can now be installed as ChatGPT.app instead of Codex.app. Read
+        // the bundle identifier first so future app renames continue to work.
+        let appURL = executableURL
+            .deletingLastPathComponent() // Resources
+            .deletingLastPathComponent() // Contents
+            .deletingLastPathComponent() // *.app
+        if Bundle(url: appURL)?.bundleIdentifier == AppState.codexAppBundleId {
+            return true
+        }
+
+        // Keep the legacy path check for synthetic/test bundles without an
+        // Info.plist and for older installations whose bundle cannot be read.
+        let appName = appURL.deletingPathExtension().lastPathComponent.lowercased()
+        return appName == "codex" || appName == "chatgpt"
+    }
+
+    /// Codex Desktop's shared app-server is launched with `/` as its cwd. Its
+    /// rollout metadata contains the project cwd, so desktop discovery must
+    /// use that value instead of comparing every transcript to `/`.
+    nonisolated static func codexDiscoveryUsesTranscriptCwd(processCwd: String?) -> Bool {
+        guard let processCwd, !processCwd.isEmpty else { return true }
+        return processCwd == "/"
+    }
+
+    /// Codex Desktop currently invokes some hooks without a payload, or with
+    /// the shared app-server's root cwd. Those events contain no session data
+    /// and would overwrite a session discovered from its rollout transcript.
+    nonisolated static func isCodexPlaceholderHook(
+        source: String?,
+        cwd: String?,
+        hasTranscriptPath: Bool
+    ) -> Bool {
+        guard source?.lowercased() == "codex", !hasTranscriptPath else { return false }
+        return cwd == nil || cwd?.trimmingCharacters(in: .whitespacesAndNewlines) == "/"
+    }
+
     private nonisolated static func findCodexPids(candidatePids: [pid_t]? = nil) -> [pid_t] {
         var codexPids: [pid_t] = []
 
@@ -4031,8 +5074,9 @@ final class AppState {
             guard let path = executablePath(for: pid) else { continue }
             let pathLower = path.lowercased()
 
-            // Match 1: Codex Desktop app (native binary)
-            if pathLower.contains("codex.app/contents/") && pathLower.hasSuffix("/codex") {
+            // Match 1: Codex Desktop app (native binary). The executable may
+            // live under Codex.app or ChatGPT.app depending on the release.
+            if isCodexExecutablePath(path) {
                 codexPids.append(pid)
                 continue
             }
@@ -4097,50 +5141,66 @@ final class AppState {
         var seenSessionIds: Set<String> = []
 
         for pid in codexPids {
-            guard let cwd = getCwd(for: pid), !cwd.isEmpty, !isSubagentWorktree(cwd) else {
-                // getCwd failed
+            let processCwd = getCwd(for: pid)
+            let useTranscriptCwd = codexDiscoveryUsesTranscriptCwd(processCwd: processCwd)
+            if !useTranscriptCwd,
+               let processCwd,
+               isSubagentWorktree(processCwd) {
                 continue
             }
-            // pid found
+
             let processStart = getProcessStartTime(pid)
 
-            // Codex stores sessions in date-based dirs: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
-            // Scan recent directories for matching session files
-            guard let bestFile = findRecentCodexSession(base: sessionsBase, cwd: cwd, after: processStart, fm: fm) else {
-                // no session file found
-                continue
+            // Codex stores sessions in date-based dirs: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl.
+            // A terminal process maps to one cwd; the shared Desktop app-server
+            // may own several sessions, so inspect all fresh rollouts instead.
+            let files: [String]
+            if useTranscriptCwd {
+                files = findRecentCodexSessions(base: sessionsBase, after: processStart, fm: fm)
+            } else if let processCwd,
+                      let bestFile = findRecentCodexSession(
+                        base: sessionsBase,
+                        cwd: processCwd,
+                        after: processStart,
+                        fm: fm
+                      ) {
+                files = [bestFile]
+            } else {
+                files = []
             }
 
-            // Extract session ID from filename: rollout-{date}-{uuid}.jsonl
-            let fileName = (bestFile as NSString).lastPathComponent
-            let sessionId = extractCodexSessionId(from: fileName)
-            guard !sessionId.isEmpty, !seenSessionIds.contains(sessionId) else { continue }
-            seenSessionIds.insert(sessionId)
+            for file in files {
+                let fileName = (file as NSString).lastPathComponent
+                let sessionId = extractCodexSessionId(from: fileName)
+                guard !sessionId.isEmpty, !seenSessionIds.contains(sessionId) else { continue }
+                seenSessionIds.insert(sessionId)
 
-            let modifiedAt = (try? fm.attributesOfItem(atPath: bestFile))?[.modificationDate] as? Date ?? Date()
+                let modifiedAt = (try? fm.attributesOfItem(atPath: file))?[.modificationDate] as? Date ?? Date()
+                let codexFreshnessLimit: TimeInterval = processStart != nil ? -300 : -30
+                if modifiedAt.timeIntervalSinceNow < codexFreshnessLimit { continue }
 
-            // Skip stale transcripts: tighter window when processStart is unknown
-            let codexFreshnessLimit: TimeInterval = processStart != nil ? -300 : -30
-            if modifiedAt.timeIntervalSinceNow < codexFreshnessLimit { continue }
+                let sessionCwd = codexSessionCwd(path: file) ?? processCwd
+                guard let sessionCwd, !sessionCwd.isEmpty, !isSubagentWorktree(sessionCwd) else { continue }
 
-            let (model, messages) = readRecentFromCodexTranscript(path: bestFile)
-            let subagentMetadata = codexSubagentMetadata(inTranscriptPath: bestFile)
+                let (model, messages) = readRecentFromCodexTranscript(path: file)
+                let subagentMetadata = codexSubagentMetadata(inTranscriptPath: file)
 
-            results.append(DiscoveredSession(
-                sessionId: sessionId,
-                cwd: cwd,
-                tty: nil,
-                model: model,
-                pid: pid,
-                modifiedAt: modifiedAt,
-                recentMessages: messages,
-                source: "codex",
-                transcriptPath: bestFile,
-                parentSessionId: subagentMetadata?.parentThreadId,
-                subagentStatus: codexThreadSpawnStatus(childThreadId: sessionId),
-                agentType: subagentMetadata?.agentType,
-                agentNickname: subagentMetadata?.agentNickname
-            ))
+                results.append(DiscoveredSession(
+                    sessionId: sessionId,
+                    cwd: sessionCwd,
+                    tty: nil,
+                    model: model,
+                    pid: pid,
+                    modifiedAt: modifiedAt,
+                    recentMessages: messages,
+                    source: "codex",
+                    transcriptPath: file,
+                    parentSessionId: subagentMetadata?.parentThreadId,
+                    subagentStatus: codexThreadSpawnStatus(childThreadId: sessionId),
+                    agentType: subagentMetadata?.agentType,
+                    agentNickname: subagentMetadata?.agentNickname
+                ))
+            }
         }
         return results
     }
@@ -4280,6 +5340,11 @@ final class AppState {
     /// Find the most recent Codex session file matching a CWD
     /// Scans back up to 7 days to cover long-running sessions that span day boundaries
     private nonisolated static func findRecentCodexSession(base: String, cwd: String, after: Date?, fm: FileManager) -> String? {
+        findRecentCodexSessions(base: base, after: after, fm: fm)
+            .first(where: { codexSessionMatchesCwd(path: $0, cwd: cwd) })
+    }
+
+    private nonisolated static func findRecentCodexSessions(base: String, after: Date?, fm: FileManager) -> [String] {
         let cal = Calendar.current
         let now = Date()
         var dirs: [String] = []
@@ -4293,11 +5358,12 @@ final class AppState {
                 dirs.append(dir)
             }
         }
-        guard !dirs.isEmpty else { return nil }
-        return scanCodexDir(dirs: dirs, cwd: cwd, after: after, fm: fm)
+        guard !dirs.isEmpty else { return [] }
+        return scanCodexDir(dirs: dirs, after: after, fm: fm)
     }
 
-    private nonisolated static func scanCodexDir(dirs: [String], cwd: String, after: Date?, fm: FileManager) -> String? {
+    private nonisolated static func scanCodexDir(dirs: [String], after: Date?, fm: FileManager) -> [String] {
+        var results: [String] = []
         for dir in dirs {
             guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
             // Sort descending to check newest first
@@ -4311,26 +5377,24 @@ final class AppState {
                    modified < start.addingTimeInterval(-10) {
                     continue
                 }
-                if codexSessionMatchesCwd(path: fullPath, cwd: cwd) {
-                    return fullPath
-                }
+                results.append(fullPath)
             }
         }
-        return nil
+        return results
     }
 
     /// Check if a Codex session file's CWD matches the target
     private nonisolated static func codexSessionMatchesCwd(path: String, cwd: String) -> Bool {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return false }
-        defer { handle.closeFile() }
-        let data = handle.readData(ofLength: 4096) // First line is enough
-        guard let text = String(data: data, encoding: .utf8),
-              let firstLine = text.components(separatedBy: "\n").first,
+        codexSessionCwd(path: path) == cwd
+    }
+
+    nonisolated static func codexSessionCwd(path: String) -> String? {
+        guard let firstLine = readFirstLine(path: path),
               let lineData = firstLine.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
               let payload = json["payload"] as? [String: Any],
-              let sessionCwd = payload["cwd"] as? String else { return false }
-        return sessionCwd == cwd
+              let sessionCwd = payload["cwd"] as? String else { return nil }
+        return sessionCwd
     }
 
     /// Extract session ID from Codex filename: rollout-2026-04-04T20-54-48-{uuid}.jsonl
@@ -4709,7 +5773,7 @@ final class AppState {
     }
 
     /// Read model and last 3 user/assistant messages from a transcript file's tail
-    private nonisolated static func readRecentFromTranscript(path: String) -> (String?, [ChatMessage]) {
+    nonisolated static func readRecentFromTranscript(path: String) -> (String?, [ChatMessage]) {
         guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, []) }
         defer { handle.closeFile() }
 
@@ -4728,10 +5792,15 @@ final class AppState {
         for line in text.components(separatedBy: "\n") {
             guard !line.isEmpty,
                   let lineData = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                  let message = json["message"] as? [String: Any],
-                  let role = message["role"] as? String
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
             else { continue }
+
+            let type = json["type"] as? String
+            let message = (json["message"] as? [String: Any]) ?? json
+            let role = (message["role"] as? String) ?? type
+
+            guard let role else { continue }
+            let normalizedRole = role.lowercased()
 
             if model == nil, let m = message["model"] as? String, !m.isEmpty {
                 model = m
@@ -4739,22 +5808,43 @@ final class AppState {
 
             // Extract text content
             var textContent: String?
-            if let content = message["content"] as? String, !content.isEmpty {
-                textContent = content
-            } else if let contentArray = message["content"] as? [[String: Any]] {
-                for item in contentArray {
-                    if item["type"] as? String == "text",
-                       let t = item["text"] as? String, !t.isEmpty {
-                        textContent = t
-                        break
+            if normalizedRole == "user" || normalizedRole == "user_input" {
+                if let content = message["content"] as? String {
+                    var text = content
+                    if let startRange = text.range(of: "<USER_REQUEST>"),
+                       let endRange = text.range(of: "</USER_REQUEST>", range: startRange.upperBound..<text.endIndex) {
+                        text = String(text[startRange.upperBound..<endRange.lowerBound])
                     }
+                    textContent = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                } else if let contentArray = message["content"] as? [[String: Any]] {
+                    for item in contentArray {
+                        if item["type"] as? String == "text",
+                           let t = item["text"] as? String, !t.isEmpty {
+                            textContent = t
+                            break
+                        }
+                    }
+                }
+            } else if normalizedRole == "assistant" || normalizedRole == "planner_response" {
+                if let content = message["content"] as? String {
+                    textContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                } else if let contentArray = message["content"] as? [[String: Any]] {
+                    for item in contentArray {
+                        if item["type"] as? String == "text",
+                           let t = item["text"] as? String, !t.isEmpty {
+                            textContent = t
+                            break
+                        }
+                    }
+                } else if let thinking = message["thinking"] as? String {
+                    textContent = thinking.trimmingCharacters(in: .whitespacesAndNewlines)
                 }
             }
 
-            if let text = textContent {
-                if role == "user" {
+            if let text = textContent, !text.isEmpty {
+                if normalizedRole == "user" || normalizedRole == "user_input" {
                     userMessages.append((index, text))
-                } else if role == "assistant" {
+                } else if normalizedRole == "assistant" || normalizedRole == "planner_response" {
                     assistantMessages.append((index, text))
                 }
             }

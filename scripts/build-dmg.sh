@@ -92,6 +92,20 @@ xcrun actool \
     "$REPO_ROOT/Assets.xcassets" \
     "$REPO_ROOT/AppIcon.icon"
 
+# Finder still relies on CFBundleIconFile/AppIcon.icns for some copied or
+# unsigned bundles. Keep a checked-in fallback so CI artifacts do not regress to
+# the generic app icon if actool changes its AppIcon.icon output behavior.
+if [ ! -s "$CONTENTS_DIR/Resources/AppIcon.icns" ]; then
+    if [ -s "$REPO_ROOT/Sources/CodeIsland/Resources/AppIcon.icns" ]; then
+        cp "$REPO_ROOT/Sources/CodeIsland/Resources/AppIcon.icns" \
+            "$CONTENTS_DIR/Resources/AppIcon.icns"
+        echo "==> Copied fallback AppIcon.icns"
+    else
+        echo "ERROR: AppIcon.icns was not generated and no fallback icon exists" >&2
+        exit 1
+    fi
+fi
+
 # Copy SPM resource bundles into Contents/Resources/ — putting them at the .app
 # root breaks Developer ID signing with "unsealed contents present in the bundle
 # root". Bundle.module already checks resourceURL, so this layout loads fine.
@@ -144,6 +158,12 @@ echo "==> App bundle assembled at $APP_DIR"
 # ---------------------------------------------------------------------------
 SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: xuteng wang (K46MBL36P8)}"
 APP_SIGNED=false
+
+# Downloaded frameworks and local Finder operations can leave quarantine,
+# provenance, or FinderInfo xattrs on nested executables. Codesign rejects those
+# as "resource fork, Finder information, or similar detritus not allowed", so
+# clear them before sealing the bundle.
+find "$APP_DIR" -exec xattr -c {} + 2>/dev/null || true
 
 adhoc_sign_app_for_local_permissions() {
     echo "==> Ad-hoc signing app with local entitlements"
@@ -224,18 +244,29 @@ echo "==> Creating DMG"
 # Remove previous DMG if exists
 rm -f "$OUTPUT_DMG"
 
-create-dmg \
-    --volname "CodeIsland ${VERSION}" \
-    --window-pos 200 120 \
-    --window-size 600 400 \
-    --icon-size 100 \
-    --icon "CodeIsland.app" 175 190 \
-    --hide-extension "CodeIsland.app" \
-    --app-drop-link 425 190 \
-    --no-internet-enable \
-    --sandbox-safe \
-    "$OUTPUT_DMG" \
-    "$STAGING_DIR/"
+if command -v create-dmg >/dev/null 2>&1; then
+    create-dmg \
+        --volname "CodeIsland ${VERSION}" \
+        --window-pos 200 120 \
+        --window-size 600 400 \
+        --icon-size 100 \
+        --icon "CodeIsland.app" 175 190 \
+        --hide-extension "CodeIsland.app" \
+        --app-drop-link 425 190 \
+        --no-internet-enable \
+        --sandbox-safe \
+        "$OUTPUT_DMG" \
+        "$STAGING_DIR/"
+else
+    echo "==> create-dmg not found — using hdiutil fallback"
+    ln -sfn /Applications "$STAGING_DIR/Applications"
+    hdiutil create \
+        -volname "CodeIsland ${VERSION}" \
+        -srcfolder "$STAGING_DIR" \
+        -format UDZO \
+        -ov \
+        "$OUTPUT_DMG"
+fi
 
 # Codesign the DMG container itself. Without this `spctl --assess` reports
 # "no usable signature" on the dmg even when the inner .app is properly

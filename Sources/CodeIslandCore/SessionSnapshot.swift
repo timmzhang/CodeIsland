@@ -21,27 +21,57 @@ public struct SessionSnapshot: Sendable {
         "copilot",
         "qoder",
         "qoder-cli",
+        "qoderwork",
         "droid",
         "codebuddy",
         "codybuddycn",
         "stepfun",
         "opencode",
         "antigravity",
+        "google-antigravity",
         "workbuddy",
         "hermes",
+        "openclaw",
         "qwen",
         "kimi",
         "pi",
         "kiro",
         "cline",
+        "zcode",
     ]
 
     public static let ideCompletionSources: Set<String> = [
         "cursor",
+        "cursor-cli",
+        "qoder",
+        "qoder-cli",
         "trae",
         "traecn",
         "codebuddy",
         "codybuddycn",
+    ]
+
+    /// Desktop-IDE *host* sources. Their GUI host/helper processes (e.g.
+    /// "Cursor Helper", "Trae Helper", the IDE's own `.../MacOS/<App>` binary)
+    /// appear in the process ancestry of ANY CLI agent launched from that IDE's
+    /// integrated terminal, and would be greedily matched by the loose
+    /// `/<source>` substring rule in `CLIProcessResolver.sourceMatchesExecutablePath`.
+    /// These must never be recovered via ancestry inference: a desktop IDE always
+    /// reports itself explicitly through `--source`, or is detected via its
+    /// dedicated `-cli` variant (`cursor-cli`, `qoder-cli`, `traecli`). Excluding
+    /// them keeps e.g. Claude Code run inside Cursor's terminal — whose `claude`
+    /// process is a source-less Node binary — from being mis-attributed to
+    /// "cursor". (#220)
+    public static let ideHostSources: Set<String> = [
+        "cursor",
+        "trae",
+        "traecn",
+        "qoder",
+        "codebuddy",
+        "codybuddycn",
+        "stepfun",
+        "antigravity",
+        "google-antigravity",
     ]
 
     public var status: AgentStatus = .idle
@@ -54,6 +84,9 @@ public struct SessionSnapshot: Sendable {
     public var toolHistory: [ToolHistoryEntry] = []
     public var totalToolCallCount: Int = 0
     public var subagents: [String: SubagentState] = [:]
+    /// Agent ids closed by SubagentStop/Stop/SessionEnd.
+    /// Blocks merge/fold from putting a finished subagent back on the parent.
+    public var closedSubagentIds: Set<String> = []
     public var startTime: Date = Date()
     public var lastUserPrompt: String?
     public var lastAssistantMessage: String?
@@ -61,6 +94,12 @@ public struct SessionSnapshot: Sendable {
     /// by hooks (`transcript_path` field) and by filesystem discovery, consumed by the
     /// JSONLTailer for incremental streaming of the latest assistant reply.
     public var transcriptPath: String?
+    /// Cursor-only (#265): question text of an AskQuestion the IDE is currently
+    /// blocked on. Cursor exposes no hook for its question tool, so this is a
+    /// display-only wait — the user answers inside Cursor itself. Non-nil means
+    /// a question is pending ("" = pending but text unknown). Set and cleared by
+    /// transcript-tail detection; transient, never persisted.
+    public var cursorPendingQuestion: String?
     /// Recent chat messages (max 3) for preview
     public var recentMessages: [ChatMessage] = []
     // Terminal info for window activation
@@ -77,6 +116,8 @@ public struct SessionSnapshot: Sendable {
     public var zellijPaneId: String?    // Zellij pane id (numeric string) from ZELLIJ_PANE_ID env var
     public var zellijSessionName: String? // Zellij session name from ZELLIJ_SESSION_NAME env var
     public var weztermPaneId: String?   // WezTerm / Kaku pane id (numeric string) from WEZTERM_PANE env var
+    public var supersetWorkspaceId: String? // Superset workspace UUID (from SUPERSET_WORKSPACE_ID env var); presence means running inside Superset
+    public var supersetPaneId: String?  // Superset pane/terminal id (from SUPERSET_PANE_ID / SUPERSET_TERMINAL_ID env var)
     public var cliPid: pid_t?            // CLI process PID (from bridge _ppid)
     public var cliStartTime: Date?       // Start time of the tracked CLI PID (guards PID reuse)
     public var source: String = "claude" // "claude" or "codex"
@@ -92,6 +133,10 @@ public struct SessionSnapshot: Sendable {
     public var remoteHostName: String?
     /// nil = unchecked, false = not YOLO, true = YOLO
     public var isYoloMode: Bool?
+    /// Checked-out git branch for cwd; refreshed on cwd changes and Stop
+    /// (a turn may have switched branches). nil for non-repo and remote cwds.
+    public var gitBranch: String?
+    public var gitIsWorktree: Bool = false
 
     public init(startTime: Date = Date()) {
         self.startTime = startTime
@@ -107,6 +152,17 @@ public struct SessionSnapshot: Sendable {
             "ag": "antigravity",
             "anti-gravity": "antigravity",
             "anti gravity": "antigravity",
+            // Google Antigravity (Gemini-based IDE/CLI). A SEPARATE product from
+            // the "antigravity" Claude-Code fork above — it reads
+            // ~/.gemini/config/hooks.json, not .antigravity/settings.json. Keep
+            // the "ag"/"anti-gravity" aliases pointed at the fork; only these
+            // explicit google-prefixed / -ide variants resolve here (#215).
+            "googleantigravity": "google-antigravity",
+            "google antigravity": "google-antigravity",
+            "google-anti-gravity": "google-antigravity",
+            "antigravity-ide": "google-antigravity",
+            "antigravity-cli": "google-antigravity",
+            "agy": "google-antigravity",
             "work-buddy": "workbuddy",
             "work body": "workbuddy",
             "work-body": "workbuddy",
@@ -115,14 +171,30 @@ public struct SessionSnapshot: Sendable {
             "hermes-agents": "hermes",
             "hermes agent": "hermes",
             "hermes agents": "hermes",
+            // OpenClaw (openclaw.ai) — personal-assistant Gateway daemon,
+            // formerly branded Clawdbot. Keep the old name as an alias so
+            // events from a not-yet-renamed install land on the same source.
+            "open-claw": "openclaw",
+            "open claw": "openclaw",
+            "clawdbot": "openclaw",
             "qwen-code": "qwen",
             "qwencode": "qwen",
             "cursor-agent": "cursor-cli",
             "cursoragent": "cursor-cli",
             "cursorcli": "cursor-cli",
             "qodercli": "qoder-cli",
+            // QoderWork — Qoder's standalone desktop assistant app (not the
+            // IDE); own hooks file at ~/.qoderwork/settings.json (#249).
+            "qoder-work": "qoderwork",
+            "qoder work": "qoderwork",
             "kimi-cli": "kimi",
             "kimicli": "kimi",
+            "kimi-code": "kimi",
+            "kimicode": "kimi",
+            "kimi_code": "kimi",
+            "kimi-code-cli": "kimi",
+            "kimicodecli": "kimi",
+            "kimi_code_cli": "kimi",
             "kiro-cli": "kiro",
             "kirocli": "kiro",
             "codebuddycn": "codybuddycn",
@@ -133,14 +205,24 @@ public struct SessionSnapshot: Sendable {
             "trae_cn": "traecn",
             "trae cn": "traecn",
             "traecli": "traecli",
+            "omp": "pi",
+            "oh-my-pi": "pi",
+            "oh my pi": "pi",
+            "z-code": "zcode",
+            "z code": "zcode",
         ]
         let canonical = aliases[normalized] ?? normalized
         let dynamicSupportedSources = supportedSources.union(loadCustomSources())
 
         if dynamicSupportedSources.contains(canonical) { return canonical }
+        // Match Google Antigravity variants BEFORE the bare "antigravity" prefix
+        // clause below, so a "google-antigravity-*" sub-brand never falls through
+        // to the Claude-fork source.
+        if canonical.hasPrefix("google-antigravity") || canonical.hasPrefix("googleantigravity") { return "google-antigravity" }
         if canonical.hasPrefix("antigravity") { return "antigravity" }
         if canonical.hasPrefix("workbuddy") { return "workbuddy" }
         if canonical.hasPrefix("hermes") { return "hermes" }
+        if canonical.hasPrefix("openclaw") { return "openclaw" }
         if canonical.hasPrefix("qwen") { return "qwen" }
         if canonical.hasPrefix("kiro") { return "kiro" }
         if canonical.hasPrefix("kimi") { return "kimi" }
@@ -224,17 +306,169 @@ public struct SessionSnapshot: Sendable {
 
     /// Display name: project folder, or short session ID
     public var displayName: String {
-        if let cwd = cwd {
-            let last = (cwd as NSString).lastPathComponent
-            // If last component is a timestamp/numeric ID (e.g. CodeBuddy "20260406010126"),
-            // show the parent directory name instead
-            if last.count >= 8 && last.allSatisfy(\.isNumber) {
-                let parent = ((cwd as NSString).deletingLastPathComponent as NSString).lastPathComponent
-                if !parent.isEmpty && parent != "/" { return parent }
+        guard let cwd = cwd else { return "Session" }
+        return Self.resolvedProjectDisplayName(from: cwd)
+    }
+
+    /// Directory names that are agent metadata, not user projects. Only these
+    /// exact dot-dirs are peeled / treated as unhelpful — legitimate dot-named
+    /// repos (.dotfiles, .config, .emacs.d) must keep their own name.
+    static let agentMetadataDirNames: Set<String> = [
+        ".claude", ".cursor", ".codex", ".gemini", ".qoder", ".qoderwork",
+        ".trae", ".trae-cn", ".kiro", ".copilot", ".factory", ".codebuddy",
+        ".codybuddycn", ".stepfun", ".workbuddy", ".hermes", ".kimi", ".kimi-code",
+        ".pi", ".omp", ".qwen", ".zcode", ".openclaw", ".codeisland",
+    ]
+
+    /// Resolve a human project folder label from a cwd path.
+    static func resolvedProjectDisplayName(from cwd: String) -> String {
+        var name = displayNameLeafFromCursorProjectsPath(cwd)
+            ?? (cwd as NSString).lastPathComponent
+
+        // Agent metadata dirs (.claude, .cursor) are not project names (#248).
+        if Self.agentMetadataDirNames.contains(name) {
+            if let peeled = peelProjectNameBeforeMetadataDir(in: cwd, leaf: name) {
+                name = peeled
+            } else if isUnhelpfulHookCwd(cwd) {
+                return "Session"
             }
-            return last
         }
-        return "Session"
+
+        if isHomeDirectoryPath(cwd) || isHomeDirectoryBasename(name, for: cwd) {
+            return "Session"
+        }
+
+        if name.count >= 8 && name.allSatisfy(\.isNumber) {
+            let parent = ((cwd as NSString).deletingLastPathComponent as NSString).lastPathComponent
+            if !parent.isEmpty && parent != "/" && !isHomeDirectoryBasename(parent, for: cwd) {
+                return parent
+            }
+        }
+        return name
+    }
+
+    /// Cursor stores projects under `~/.cursor/projects/<encoded>/…` where slashes
+    /// in the original workspace path become hyphens. Literal hyphens inside a
+    /// folder name are preserved, so naive full-path reversal is ambiguous — walk
+    /// hyphen segments from the right until the reconstructed path exists.
+    /// Decode results are memoized: displayName is evaluated on every SwiftUI
+    /// render of every session card, and the walk below stats the filesystem.
+    /// NSCache is thread-safe and evicts under memory pressure.
+    private static let cursorLeafCache = NSCache<NSString, NSString>()
+
+    static func displayNameLeafFromCursorProjectsPath(_ cwd: String) -> String? {
+        if let cached = cursorLeafCache.object(forKey: cwd as NSString) {
+            return cached.length == 0 ? nil : (cached as String)
+        }
+        let result = computeDisplayNameLeafFromCursorProjectsPath(cwd)
+        cursorLeafCache.setObject((result ?? "") as NSString, forKey: cwd as NSString)
+        return result
+    }
+
+    private static func computeDisplayNameLeafFromCursorProjectsPath(_ cwd: String) -> String? {
+        let marker = "/.cursor/projects/"
+        guard let range = cwd.range(of: marker) else { return nil }
+        let encoded = cwd[range.upperBound...].split(separator: "/").first.map(String.init) ?? ""
+        guard !encoded.isEmpty else { return nil }
+
+        let homeEncoded = homeDirectoryProjectEncoded()
+        let projectEncoded: String
+        if encoded.hasPrefix(homeEncoded + "-") {
+            projectEncoded = String(encoded.dropFirst(homeEncoded.count + 1))
+        } else if encoded == homeEncoded {
+            return nil
+        } else {
+            projectEncoded = encoded
+        }
+        guard !projectEncoded.isEmpty else { return nil }
+
+        let parts = projectEncoded.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
+        guard !parts.isEmpty else { return nil }
+
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let fm = FileManager.default
+        // Prefer the longest leaf whose prefix reconstructs to a real directory.
+        for k in stride(from: parts.count - 1, through: 0, by: -1) {
+            let leaf = parts[k...].joined(separator: "-")
+            guard !leaf.isEmpty else { continue }
+            if k == 0 {
+                return leaf
+            }
+            let relative = parts[..<k].joined(separator: "/") + "/" + leaf
+            if fm.fileExists(atPath: "\(home)/\(relative)") {
+                return leaf
+            }
+        }
+        return parts.last
+    }
+
+    /// When cwd sits inside a metadata dir, or a Cursor-encoded leaf is one, peel
+    /// back to the real project folder name.
+    static func peelProjectNameBeforeMetadataDir(in cwd: String, leaf: String) -> String? {
+        guard Self.agentMetadataDirNames.contains(leaf) else { return nil }
+
+        if cwd.contains("/.cursor/projects/") {
+            let marker = "/.cursor/projects/"
+            guard let range = cwd.range(of: marker) else { return nil }
+            let encoded = cwd[range.upperBound...].split(separator: "/").first.map(String.init) ?? ""
+            if let peeled = peelEncodedProjectTailBeforeMetadataDir(encoded) {
+                return peeled
+            }
+        }
+
+        let parent = ((cwd as NSString).deletingLastPathComponent as NSString).lastPathComponent
+        let parentPath = (cwd as NSString).deletingLastPathComponent
+        if !parent.isEmpty && parent != "/",
+           !isHomeDirectoryPath(parentPath),
+           !parent.contains("/.cursor/projects/"),
+           !looksLikeCursorEncodedDir(parent) {
+            return parent
+        }
+        return nil
+    }
+
+    /// Hook/bridge cwd values that carry no project identity — getcwd() inside
+    /// `~/.claude` or at `$HOME` must not block workspace_roots / transcript_path.
+    static func isUnhelpfulHookCwd(_ cwd: String) -> Bool {
+        if isHomeDirectoryPath(cwd) { return true }
+        let last = (cwd as NSString).lastPathComponent
+        guard Self.agentMetadataDirNames.contains(last) else { return false }
+        return isHomeDirectoryPath((cwd as NSString).deletingLastPathComponent)
+    }
+
+    static func isHomeDirectoryPath(_ path: String) -> Bool {
+        let home = (FileManager.default.homeDirectoryForCurrentUser.path as NSString).standardizingPath
+        return (path as NSString).standardizingPath == home
+    }
+
+    static func isHomeDirectoryBasename(_ name: String, for cwd: String) -> Bool {
+        name == (FileManager.default.homeDirectoryForCurrentUser.path as NSString).lastPathComponent
+            && (isHomeDirectoryPath(cwd) || isUnhelpfulHookCwd(cwd))
+    }
+
+    static func peelEncodedProjectTailBeforeMetadataDir(_ encoded: String) -> String? {
+        let homeEncoded = homeDirectoryProjectEncoded()
+        let projectEncoded: String
+        if encoded.hasPrefix(homeEncoded + "-") {
+            projectEncoded = String(encoded.dropFirst(homeEncoded.count + 1))
+        } else {
+            projectEncoded = encoded
+        }
+        let parts = projectEncoded.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 2, let last = parts.last,
+              Self.agentMetadataDirNames.contains(last) else { return nil }
+        let peeled = parts[parts.count - 2]
+        return peeled.isEmpty ? nil : peeled
+    }
+
+    private static func looksLikeCursorEncodedDir(_ name: String) -> Bool {
+        name.contains("-") && !name.hasPrefix(".")
+    }
+
+    private static func homeDirectoryProjectEncoded() -> String {
+        var home = FileManager.default.homeDirectoryForCurrentUser.path
+        if home.hasPrefix("/") { home = String(home.dropFirst()) }
+        return home.replacingOccurrences(of: "/", with: "-")
     }
 
     public func displayTitle(sessionId: String) -> String {
@@ -332,19 +566,23 @@ public struct SessionSnapshot: Sendable {
         case "traecli": return "Traecli"
         case "qoder": return "Qoder"
         case "qoder-cli": return "Qoder CLI"
+        case "qoderwork": return "QoderWork"
         case "droid": return "Factory"
         case "codebuddy": return "CodeBuddy"
         case "codybuddycn": return "CodyBuddyCN"
         case "stepfun": return "StepFun"
         case "opencode": return "OpenCode"
         case "antigravity": return "AntiGravity"
+        case "google-antigravity": return "Google Antigravity"
         case "workbuddy": return "WorkBuddy"
         case "hermes": return "Hermes"
+        case "openclaw": return "OpenClaw"
         case "qwen": return "Qwen Code"
         case "kimi": return "Kimi Code CLI"
-        case "pi": return "pi"
+        case "pi": return "Pi"
         case "kiro": return "Kiro"
         case "cline": return "Cline"
+        case "zcode": return "ZCode"
         default:
             if let customName = Self.loadCustomSourceNames()[source] {
                 return customName
@@ -396,8 +634,10 @@ public struct SessionSnapshot: Sendable {
         "com.stepfun.app": "StepFun",
         "com.openai.codex": "Codex",
         "ai.opencode.desktop": "OpenCode",
+        "com.google.antigravity": "Antigravity",
         // Claude Desktop runs Claude sessions inside the native app. Recognizing
-        // the bundle keeps question/approval surfaces on the native-app path.
+        // the bundle keeps question/approval surfaces on the native-app path, and
+        // its Code tab fires the same ~/.claude/settings.json hooks as the CLI (#211).
         "com.anthropic.claudefordesktop": "Claude",
     ]
 
@@ -414,6 +654,11 @@ public struct SessionSnapshot: Sendable {
         "com.stepfun.app": "stepfun",
         "com.openai.codex": "codex",
         "ai.opencode.desktop": "opencode",
+        // Google Antigravity IDE — its integrated terminal launches the agy CLI,
+        // whose hooks report --source google-antigravity (#215).
+        "com.google.antigravity": "google-antigravity",
+        // Claude Code Desktop (#211) — hook subprocesses inherit the app's
+        // __CFBundleIdentifier, so desktop Code sessions arrive tagged with it.
         "com.anthropic.claudefordesktop": "claude",
     ]
 
@@ -459,6 +704,10 @@ public struct SessionSnapshot: Sendable {
             if lower.contains("android.studio") { return "Android Studio" }
             if lower.contains("antigravity") { return "Antigravity" }
         }
+        // Superset spoofs TERM_PROGRAM to "kitty" and strips __CFBundleIdentifier, so the only
+        // way to label it correctly is its own SUPERSET_* env vars. Check before the TERM_PROGRAM
+        // fallback below, otherwise it would mislabel as "Kitty". (#213)
+        if supersetWorkspaceId != nil || supersetPaneId != nil { return "Superset" }
         // Fallback to TERM_PROGRAM
         guard let app = termApp else { return nil }
         let lower = app.lowercased()
@@ -587,10 +836,16 @@ public func reduceEvent(
     }
 
     // Always update metadata from parent events. Subagent events are routed
-    // through the parent session ID, so applying their metadata here would
+    // through the parent session ID, so applying their full metadata here would
     // overwrite the parent's model/transcript/title with child-session values.
+    // Still fill *missing* identity fields so a merge-first Task hook does not
+    // leave the parent stuck as the default `source == "claude"`.
+    // `routesAsSubagent` (not `agentId == nil`) is the gate: an empty or `solo_agent`
+    // agentId marks a main-session event that must still write full metadata.
     if !event.routesAsSubagent {
         extractMetadata(into: &sessions, sessionId: sessionId, event: event)
+    } else {
+        fillMissingParentMetadataFromSubagentEvent(into: &sessions, sessionId: sessionId, event: event)
     }
     let isRemote = sessions[sessionId]?.isRemote == true
 
@@ -638,6 +893,11 @@ public func reduceEvent(
         sessions[sessionId]?.status = .processing
         sessions[sessionId]?.currentTool = nil
         sessions[sessionId]?.toolDescription = nil
+        // Separate-mode Cursor Task Stop self-tombstones; a new prompt means relaunch.
+        if let source = sessions[sessionId]?.source,
+           source == "cursor" || source == "cursor-cli" {
+            sessions[sessionId]?.closedSubagentIds.remove(sessionId)
+        }
         // Probe a wider set of field names + nested containers. Qwen Code (#103),
         // Hermes (#117), and most Claude forks put the prompt at "prompt" top-level,
         // but some forks nest it inside `input` / `data` / `payload` / `params`,
@@ -711,12 +971,26 @@ public func reduceEvent(
             sessions[sessionId]?.lastAssistantMessage = text
             sessions[sessionId]?.addRecentMessage(ChatMessage(isUser: false, text: text))
         }
+        let hasActiveSubagents = sessions[sessionId]?.subagents.values.contains {
+            $0.status != .idle
+        } == true
         if let source = sessions[sessionId]?.source,
            SessionSnapshot.ideCompletionSources.contains(source) {
-            sessions[sessionId]?.status = .idle
-            sessions[sessionId]?.currentTool = nil
-            sessions[sessionId]?.toolDescription = nil
-            effects.append(.enqueueCompletion(sessionId: sessionId))
+            // Parent chat finished a turn while folded Tasks are still working —
+            // keep the card active and do not pop a premature completion.
+            if hasActiveSubagents {
+                if !isWaiting {
+                    sessions[sessionId]?.status = .running
+                    if sessions[sessionId]?.currentTool == nil {
+                        sessions[sessionId]?.currentTool = "Agent"
+                    }
+                }
+            } else {
+                sessions[sessionId]?.status = .idle
+                sessions[sessionId]?.currentTool = nil
+                sessions[sessionId]?.toolDescription = nil
+                effects.append(.enqueueCompletion(sessionId: sessionId))
+            }
         } else {
             sessions[sessionId]?.status = .processing
         }
@@ -747,10 +1021,29 @@ public func reduceEvent(
     case "Stop":
         // Detect ESC/Ctrl+C interruption
         let stopReason = event.rawJSON["stop_reason"] as? String ?? ""
-        sessions[sessionId]?.interrupted = (stopReason == "user" || stopReason == "interrupted")
-        sessions[sessionId]?.status = .idle
-        sessions[sessionId]?.currentTool = nil
-        sessions[sessionId]?.toolDescription = nil
+        let wasInterrupted = (stopReason == "user" || stopReason == "interrupted")
+        let hasActiveSubagents = sessions[sessionId]?.subagents.values.contains {
+            $0.status != .idle
+        } == true
+        // Separate-mode Cursor Tasks have no agent_id, so merge later must see
+        // this id as closed — otherwise a still-live IDE `_ppid` resuscitates them.
+        // Only self-tombstone foldable Task cards (transcript parent ≠ session id),
+        // never the parent chat — that would suppress late Permission UI and wipe
+        // the IDE `_ppid` monitor after a normal turn Stop.
+        if !hasActiveSubagents,
+           let source = sessions[sessionId]?.source,
+           source == "cursor" || source == "cursor-cli",
+           CursorSessionFolding.foldTarget(
+               childSessionId: sessionId,
+               transcriptPath: sessions[sessionId]?.transcriptPath
+           ) != nil {
+            sessions[sessionId]?.closedSubagentIds.insert(sessionId)
+            // Drop process identity so a still-open IDE `_ppid` does not look like
+            // a live Task after Stop when the card is later considered for merge.
+            sessions[sessionId]?.cliPid = nil
+            sessions[sessionId]?.cliStartTime = nil
+        }
+
         let assistantMsg = firstStringFromEvent(
             event,
             keys: ["last_assistant_message", "text", "message", "summary"],
@@ -772,7 +1065,24 @@ public func reduceEvent(
                 sessions[sessionId]?.insertRecentMessage(ChatMessage(isUser: true, text: prompt), at: insertAt)
             }
         }
-        effects.append(.enqueueCompletion(sessionId: sessionId))
+
+        // Parent chat Stop while folded Tasks are still working — keep the card
+        // active and do not pop a premature completion (same as AfterAgentResponse).
+        if hasActiveSubagents {
+            if !isWaiting {
+                sessions[sessionId]?.status = .running
+                if sessions[sessionId]?.currentTool == nil {
+                    sessions[sessionId]?.currentTool = "Agent"
+                }
+            }
+            // Do not latch `interrupted` onto a still-active parent+Task card.
+        } else {
+            sessions[sessionId]?.interrupted = wasInterrupted
+            sessions[sessionId]?.status = .idle
+            sessions[sessionId]?.currentTool = nil
+            sessions[sessionId]?.toolDescription = nil
+            effects.append(.enqueueCompletion(sessionId: sessionId))
+        }
     case "SessionStart":
         effects.append(.stopMonitor(sessionId: sessionId))
         sessions[sessionId] = SessionSnapshot(startTime: Date())
@@ -780,8 +1090,11 @@ public func reduceEvent(
         if let cwd = event.rawJSON["cwd"] as? String, !cwd.isEmpty { sessions[sessionId]?.cwd = cwd }
         if let model = event.rawJSON["model"] as? String, !model.isEmpty { sessions[sessionId]?.model = model }
         if let ppid = event.rawJSON["_ppid"] as? Int, ppid > 0 {
-            sessions[sessionId]?.cliPid = pid_t(ppid)
-            sessions[sessionId]?.cliStartTime = nil
+            let newPid = pid_t(ppid)
+            if sessions[sessionId]?.cliPid != newPid {
+                sessions[sessionId]?.cliPid = newPid
+                sessions[sessionId]?.cliStartTime = nil
+            }
         }
         if let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) {
             sessions[sessionId]?.source = source
@@ -820,6 +1133,15 @@ public func reduceEvent(
         }
         if let weztermPane = event.rawJSON["_wezterm_pane"] as? String, !weztermPane.isEmpty {
             sessions[sessionId]?.weztermPaneId = weztermPane
+        }
+        if let supersetWs = event.rawJSON["_superset_workspace_id"] as? String, !supersetWs.isEmpty {
+            sessions[sessionId]?.supersetWorkspaceId = supersetWs
+        }
+        if let supersetPane = event.rawJSON["_superset_pane_id"] as? String, !supersetPane.isEmpty {
+            sessions[sessionId]?.supersetPaneId = supersetPane
+        }
+        if let env = event.rawJSON["_env"] as? [String: String] {
+            applyEnvMetadata(into: &sessions, sessionId: sessionId, env: env)
         }
         if let remoteHostId = event.rawJSON["_remote_host_id"] as? String, !remoteHostId.isEmpty {
             sessions[sessionId]?.remoteHostId = remoteHostId
@@ -916,23 +1238,155 @@ public func reduceEvent(
 
 // MARK: - Private Helpers
 
+private func applyEnvMetadata(into sessions: inout [String: SessionSnapshot], sessionId: String, env: [String: String]) {
+    if sessions[sessionId]?.termApp == nil,
+       let app = env["TERM_PROGRAM"], !app.isEmpty {
+        sessions[sessionId]?.termApp = app
+    }
+    if sessions[sessionId]?.termBundleId == nil,
+       let bundle = env["__CFBundleIdentifier"], !bundle.isEmpty {
+        sessions[sessionId]?.termBundleId = bundle
+    }
+    if sessions[sessionId]?.itermSessionId == nil,
+       let ses = env["ITERM_SESSION_ID"], !ses.isEmpty {
+        if let colonIdx = ses.firstIndex(of: ":") {
+            sessions[sessionId]?.itermSessionId = String(ses[ses.index(after: colonIdx)...])
+        } else {
+            sessions[sessionId]?.itermSessionId = ses
+        }
+    }
+    if sessions[sessionId]?.kittyWindowId == nil,
+       let kitty = env["KITTY_WINDOW_ID"], !kitty.isEmpty {
+        sessions[sessionId]?.kittyWindowId = kitty
+    }
+    if sessions[sessionId]?.tmuxEnv == nil,
+       let tmux = env["TMUX"], !tmux.isEmpty {
+        sessions[sessionId]?.tmuxEnv = tmux
+    }
+    if sessions[sessionId]?.tmuxPane == nil,
+       let pane = env["TMUX_PANE"], !pane.isEmpty {
+        sessions[sessionId]?.tmuxPane = pane
+    }
+    if sessions[sessionId]?.cmuxSurfaceId == nil,
+       let surface = env["CMUX_SURFACE_ID"], !surface.isEmpty {
+        sessions[sessionId]?.cmuxSurfaceId = surface
+    }
+    if sessions[sessionId]?.cmuxWorkspaceId == nil,
+       let workspace = env["CMUX_WORKSPACE_ID"], !workspace.isEmpty {
+        sessions[sessionId]?.cmuxWorkspaceId = workspace
+    }
+    if sessions[sessionId]?.zellijPaneId == nil,
+       let pane = env["ZELLIJ_PANE_ID"], !pane.isEmpty {
+        sessions[sessionId]?.zellijPaneId = pane
+    }
+    if sessions[sessionId]?.zellijSessionName == nil,
+       let name = env["ZELLIJ_SESSION_NAME"], !name.isEmpty {
+        sessions[sessionId]?.zellijSessionName = name
+    }
+    if sessions[sessionId]?.weztermPaneId == nil,
+       let pane = env["WEZTERM_PANE"], !pane.isEmpty {
+        sessions[sessionId]?.weztermPaneId = pane
+    }
+    if sessions[sessionId]?.supersetWorkspaceId == nil,
+       let workspace = env["SUPERSET_WORKSPACE_ID"], !workspace.isEmpty {
+        sessions[sessionId]?.supersetWorkspaceId = workspace
+    }
+    if sessions[sessionId]?.supersetPaneId == nil,
+       let pane = env["SUPERSET_PANE_ID"] ?? env["SUPERSET_TERMINAL_ID"], !pane.isEmpty {
+        sessions[sessionId]?.supersetPaneId = pane
+    }
+}
+
+/// Fill identity fields on a parent card from a merged Task/subagent hook.
+/// Unlike `extractMetadata`, never overwrites values already set on the parent
+/// (child payloads can carry Task-specific cwd/model/title).
+public func fillMissingParentMetadataFromSubagentEvent(
+    into sessions: inout [String: SessionSnapshot],
+    sessionId: String,
+    event: HookEvent
+) {
+    // Default SessionSnapshot.source is "claude". Upgrade when the hook carries a
+    // real source so merge-first Cursor Tasks are not branded as Claude forever.
+    if sessions[sessionId]?.source == "claude",
+       let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String)
+        ?? SessionSnapshot.normalizedSupportedSource(event.rawJSON["source"] as? String),
+       source != "claude" {
+        sessions[sessionId]?.source = source
+    }
+
+    let cwdMissing = sessions[sessionId]?.cwd == nil
+        || SessionSnapshot.isUnhelpfulHookCwd(sessions[sessionId]?.cwd ?? "")
+    if cwdMissing {
+        if let cwd = event.rawJSON["cwd"] as? String, !cwd.isEmpty,
+           !SessionSnapshot.isUnhelpfulHookCwd(cwd) {
+            sessions[sessionId]?.cwd = cwd
+        } else if let roots = event.rawJSON["workspace_roots"] as? [String],
+                  let first = roots.first, !first.isEmpty {
+            sessions[sessionId]?.cwd = first
+        } else if let tp = event.rawJSON["transcript_path"] as? String,
+                  tp.contains("/.cursor/projects/") {
+            let parts = tp.split(separator: "/")
+            if let idx = parts.firstIndex(of: "projects"), idx + 1 < parts.count {
+                let projectName = String(parts[idx + 1])
+                sessions[sessionId]?.cwd = "/\(parts[...idx].joined(separator: "/"))/\(projectName)"
+            }
+        }
+    }
+
+    if sessions[sessionId]?.transcriptPath == nil,
+       let transcriptPath = event.rawJSON["transcript_path"] as? String, !transcriptPath.isEmpty {
+        sessions[sessionId]?.transcriptPath = transcriptPath
+    }
+
+    if sessions[sessionId]?.cliPid == nil,
+       let ppid = event.rawJSON["_ppid"] as? Int, ppid > 0 {
+        sessions[sessionId]?.cliPid = pid_t(ppid)
+    }
+}
+
+private func shouldReopenCursorSubagentOnPrompt(event: HookEvent, session: SessionSnapshot?) -> Bool {
+    if (event.rawJSON["_cursor_subagent"] as? Bool) == true {
+        return true
+    }
+    let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String)
+        ?? SessionSnapshot.normalizedSupportedSource(event.rawJSON["source"] as? String)
+        ?? session?.source
+    return source == "cursor" || source == "cursor-cli"
+}
+
 public func extractMetadata(into sessions: inout [String: SessionSnapshot], sessionId: String, event: HookEvent) {
-    if let cwd = event.rawJSON["cwd"] as? String, !cwd.isEmpty {
+    let eventCwd = event.rawJSON["cwd"] as? String
+    if let cwd = eventCwd, !cwd.isEmpty,
+       !SessionSnapshot.isUnhelpfulHookCwd(cwd) {
         sessions[sessionId]?.cwd = cwd
-    } else if sessions[sessionId]?.cwd == nil,
-              let roots = event.rawJSON["workspace_roots"] as? [String],
-              let first = roots.first, !first.isEmpty {
+    }
+    if sessions[sessionId]?.cwd == nil
+        || SessionSnapshot.isUnhelpfulHookCwd(sessions[sessionId]?.cwd ?? ""),
+       let roots = event.rawJSON["workspace_roots"] as? [String],
+       let first = roots.first, !first.isEmpty {
         sessions[sessionId]?.cwd = first
-    } else if sessions[sessionId]?.cwd == nil,
-              let tp = event.rawJSON["transcript_path"] as? String, !tp.isEmpty {
+    } else if sessions[sessionId]?.cwd == nil
+        || SessionSnapshot.isUnhelpfulHookCwd(sessions[sessionId]?.cwd ?? ""),
+              let tp = event.rawJSON["transcript_path"] as? String,
+              tp.contains("/.cursor/projects/") {
         // Cursor: extract project dir from transcript_path
         // e.g. ~/.cursor/projects/<project>/agent-transcripts/... → ~/.cursor/projects/<project>
+        // Must stay Cursor-scoped: Claude transcripts also contain a "projects"
+        // component (~/.claude/projects/<encoded>/…) that is not a workspace.
         let parts = tp.split(separator: "/")
         if let idx = parts.firstIndex(of: "projects"), idx + 1 < parts.count {
             let projectName = String(parts[idx + 1])
             sessions[sessionId]?.cwd = "/\(parts[...idx].joined(separator: "/"))/\(projectName)"
         }
+    } else if sessions[sessionId]?.cwd == nil, let cwd = eventCwd, !cwd.isEmpty {
+        // Last resort: an unhelpful cwd ($HOME, ~/.claude) still beats nil —
+        // transcript-based model lookup keys off it, and the display layer
+        // already renders these paths as "Session".
+        sessions[sessionId]?.cwd = cwd
     }
+    // Git branch resolution is NOT done here: this reducer runs on the main
+    // actor and .git probing can block on network mounts. AppState refreshes
+    // it asynchronously after reduce (maybeRefreshGitBranch).
     if let model = event.rawJSON["model"] as? String, !model.isEmpty {
         sessions[sessionId]?.model = model
     }
@@ -970,37 +1424,16 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
     if let bundle = event.rawJSON["_term_bundle"] as? String, !bundle.isEmpty {
         sessions[sessionId]?.termBundleId = bundle
     }
-    // Fallback: extract terminal info from _env sub-object (OpenCode plugin format)
+    // Fallback: extract terminal/multiplexer info from _env sub-object (direct plugin format)
     if let env = event.rawJSON["_env"] as? [String: String] {
-        if sessions[sessionId]?.termApp == nil,
-           let app = env["TERM_PROGRAM"], !app.isEmpty {
-            sessions[sessionId]?.termApp = app
-        }
-        if sessions[sessionId]?.termBundleId == nil,
-           let bundle = env["__CFBundleIdentifier"], !bundle.isEmpty {
-            sessions[sessionId]?.termBundleId = bundle
-        }
-        if sessions[sessionId]?.itermSessionId == nil,
-           let ses = env["ITERM_SESSION_ID"], !ses.isEmpty {
-            // Extract GUID after "w0t0p0:" prefix
-            if let colonIdx = ses.firstIndex(of: ":") {
-                sessions[sessionId]?.itermSessionId = String(ses[ses.index(after: colonIdx)...])
-            } else {
-                sessions[sessionId]?.itermSessionId = ses
-            }
-        }
-        if sessions[sessionId]?.kittyWindowId == nil,
-           let kitty = env["KITTY_WINDOW_ID"], !kitty.isEmpty {
-            sessions[sessionId]?.kittyWindowId = kitty
-        }
-        if sessions[sessionId]?.tmuxPane == nil,
-           let pane = env["TMUX_PANE"], !pane.isEmpty {
-            sessions[sessionId]?.tmuxPane = pane
-        }
+        applyEnvMetadata(into: &sessions, sessionId: sessionId, env: env)
     }
     if let ppid = event.rawJSON["_ppid"] as? Int, ppid > 0 {
-        sessions[sessionId]?.cliPid = pid_t(ppid)
-        sessions[sessionId]?.cliStartTime = nil
+        let newPid = pid_t(ppid)
+        if sessions[sessionId]?.cliPid != newPid {
+            sessions[sessionId]?.cliPid = newPid
+            sessions[sessionId]?.cliStartTime = nil
+        }
     }
     let termBundleId = sessions[sessionId]?.termBundleId
     if let source = SessionSnapshot.normalizedSupportedSource(event.rawJSON["_source"] as? String) {
@@ -1032,6 +1465,14 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
     if let weztermPane = event.rawJSON["_wezterm_pane"] as? String, !weztermPane.isEmpty {
         sessions[sessionId]?.weztermPaneId = weztermPane
     }
+    // Superset workspace / pane (injected by bridge from SUPERSET_* env vars). Presence routes
+    // activation to com.superset.desktop instead of the spoofed kitty TERM_PROGRAM. (#213)
+    if let supersetWs = event.rawJSON["_superset_workspace_id"] as? String, !supersetWs.isEmpty {
+        sessions[sessionId]?.supersetWorkspaceId = supersetWs
+    }
+    if let supersetPane = event.rawJSON["_superset_pane_id"] as? String, !supersetPane.isEmpty {
+        sessions[sessionId]?.supersetPaneId = supersetPane
+    }
     if let remoteHostId = event.rawJSON["_remote_host_id"] as? String, !remoteHostId.isEmpty {
         sessions[sessionId]?.remoteHostId = remoteHostId
     }
@@ -1049,15 +1490,44 @@ public func extractMetadata(into sessions: inout [String: SessionSnapshot], sess
     }
 }
 
+/// Pull a non-empty string from a hook JSON value.
+/// Supports plain strings and content-part arrays such as Kimi Code CLI's
+/// `prompt: [{ "type": "text", "text": "..." }]`.
+private func stringFromHookJSONValue(_ value: Any?) -> String? {
+    if let value = value as? String {
+        // Trim only to detect empty / whitespace-only payloads; return the
+        // original value so callers preserve any leading/trailing
+        // whitespace inside code-snippet prompts and multi-line content.
+        return value.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty
+            ? nil : value
+    }
+
+    let parts: [[String: Any]]
+    if let typed = value as? [[String: Any]] {
+        parts = typed
+    } else if let anyParts = value as? [Any] {
+        parts = anyParts.compactMap { $0 as? [String: Any] }
+        if parts.isEmpty { return nil }
+    } else {
+        return nil
+    }
+
+    let texts = parts.compactMap { part -> String? in
+        if let type = part["type"] as? String, type != "text" { return nil }
+        guard let text = part["text"] as? String,
+              !text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return text
+    }
+    let joined = texts.joined()
+    return joined.isEmpty ? nil : joined
+}
+
 private func firstStringFromDict(_ dict: [String: Any], keys: [String]) -> String? {
     for key in keys {
-        if let value = dict[key] as? String {
-            // Trim only to detect empty / whitespace-only payloads; return the
-            // original value so callers preserve any leading/trailing
-            // whitespace inside code-snippet prompts and multi-line content.
-            if !value.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
-                return value
-            }
+        if let value = stringFromHookJSONValue(dict[key]) {
+            return value
         }
     }
     return nil
@@ -1087,13 +1557,20 @@ private func ensureSubagent(
     sessionId: String,
     agentId: String,
     event: HookEvent
-) {
+) -> Bool {
+    // Only SubagentStart/SessionStart may reopen a closed agent id for most
+    // providers. Cursor Tasks relaunch via UserPromptSubmit (see handleSubagentEvent).
+    // Later tool/response hooks with the same agent_id must not revive it.
+    if sessions[sessionId]?.closedSubagentIds.contains(agentId) == true {
+        return false
+    }
     if sessions[sessionId]?.subagents[agentId] == nil {
         sessions[sessionId]?.subagents[agentId] = SubagentState(
             agentId: agentId,
             agentType: subagentType(from: event)
         )
     }
+    return true
 }
 
 /// Handle subagent events. Returns true if the event was consumed.
@@ -1109,6 +1586,7 @@ private func handleSubagentEvent(
     switch eventName {
     case "SubagentStart", "SessionStart":
         let agentType = subagentType(from: event)
+        sessions[sessionId]?.closedSubagentIds.remove(agentId)
         sessions[sessionId]?.subagents[agentId] = SubagentState(
             agentId: agentId,
             agentType: agentType
@@ -1124,7 +1602,13 @@ private func handleSubagentEvent(
         return true
 
     case "UserPromptSubmit":
-        ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event)
+        // Cursor has no SessionStart for Tasks; beforeSubmitPrompt is the relaunch signal.
+        if shouldReopenCursorSubagentOnPrompt(event: event, session: sessions[sessionId]) {
+            sessions[sessionId]?.closedSubagentIds.remove(agentId)
+        }
+        guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
+            return true
+        }
         sessions[sessionId]?.subagents[agentId]?.status = .processing
         sessions[sessionId]?.subagents[agentId]?.lastActivity = Date()
         if sessions[sessionId]?.status != .waitingApproval && sessions[sessionId]?.status != .waitingQuestion {
@@ -1139,6 +1623,7 @@ private func handleSubagentEvent(
 
     case "SubagentStop", "Stop", "SessionEnd":
         sessions[sessionId]?.subagents.removeValue(forKey: agentId)
+        sessions[sessionId]?.closedSubagentIds.insert(agentId)
         // If no more subagents, revert parent to processing (waiting for main thread to continue)
         if sessions[sessionId]?.subagents.isEmpty == true {
             if sessions[sessionId]?.status == .running && sessions[sessionId]?.currentTool == "Agent" {
@@ -1151,7 +1636,9 @@ private func handleSubagentEvent(
         return true
 
     case "PreToolUse":
-        ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event)
+        guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
+            return true
+        }
         sessions[sessionId]?.subagents[agentId]?.status = .running
         sessions[sessionId]?.subagents[agentId]?.currentTool = event.toolName
         sessions[sessionId]?.subagents[agentId]?.toolDescription = event.toolDescription
@@ -1164,7 +1651,9 @@ private func handleSubagentEvent(
         return true
 
     case "PostToolUse":
-        ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event)
+        guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
+            return true
+        }
         if let tool = sessions[sessionId]?.subagents[agentId]?.currentTool {
             let agentType = sessions[sessionId]?.subagents[agentId]?.agentType
             let desc = sessions[sessionId]?.subagents[agentId]?.toolDescription
@@ -1178,7 +1667,9 @@ private func handleSubagentEvent(
         return true
 
     case "PostToolUseFailure":
-        ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event)
+        guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
+            return true
+        }
         if let tool = sessions[sessionId]?.subagents[agentId]?.currentTool {
             let agentType = sessions[sessionId]?.subagents[agentId]?.agentType
             let desc = sessions[sessionId]?.subagents[agentId]?.toolDescription
@@ -1188,6 +1679,51 @@ private func handleSubagentEvent(
         sessions[sessionId]?.subagents[agentId]?.currentTool = nil
         sessions[sessionId]?.subagents[agentId]?.toolDescription = nil
         sessions[sessionId]?.lastActivity = Date()
+        return true
+
+    case "AfterAgentResponse":
+        // Merged Cursor Task events arrive with parent session_id + child agent_id.
+        // Handle here so they do not overwrite the parent's reply or enqueue a false completion.
+        guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
+            return true
+        }
+        sessions[sessionId]?.subagents[agentId]?.status = .processing
+        sessions[sessionId]?.subagents[agentId]?.lastActivity = Date()
+        sessions[sessionId]?.lastActivity = Date()
+        if sessions[sessionId]?.status != .waitingApproval
+            && sessions[sessionId]?.status != .waitingQuestion
+            && sessions[sessionId]?.status != .running {
+            sessions[sessionId]?.status = .processing
+        }
+        return true
+
+    case "Notification":
+        // Keep folded Tasks' ask/question notifications on the parent card.
+        // Swallowing them here (as AfterAgentResponse did) dropped waitingQuestion.
+        guard ensureSubagent(sessions: &sessions, sessionId: sessionId, agentId: agentId, event: event) else {
+            return true
+        }
+        sessions[sessionId]?.subagents[agentId]?.lastActivity = Date()
+        sessions[sessionId]?.lastActivity = Date()
+        let notificationText = firstStringFromEvent(
+            event,
+            keys: ["message", "text", "summary", "status", "detail"],
+            includeNested: true
+        )
+        if let msg = notificationText, !msg.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
+            sessions[sessionId]?.toolDescription = msg
+            sessions[sessionId]?.subagents[agentId]?.toolDescription = msg
+        }
+        if QuestionPayload.from(event: event) != nil {
+            sessions[sessionId]?.status = .waitingQuestion
+            sessions[sessionId]?.subagents[agentId]?.status = .waitingQuestion
+            effects.append(.setActiveSession(sessionId: sessionId))
+        } else if sessions[sessionId]?.status != .waitingApproval
+            && sessions[sessionId]?.status != .waitingQuestion
+            && sessions[sessionId]?.status != .running {
+            sessions[sessionId]?.status = .processing
+            sessions[sessionId]?.subagents[agentId]?.status = .processing
+        }
         return true
 
     default:

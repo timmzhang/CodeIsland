@@ -85,6 +85,10 @@ struct CodexPermissionRules {
 
     @discardableResult
     func persistAlwaysAllowRule(for event: HookEvent) -> Bool {
+        if let mcpTool = Self.mcpToolApprovalTarget(for: event) {
+            return persistMCPToolApproval(serverID: mcpTool.serverID, toolName: mcpTool.toolName)
+        }
+
         guard let pattern = Self.prefixPattern(for: event), !pattern.isEmpty else {
             return false
         }
@@ -115,8 +119,69 @@ struct CodexPermissionRules {
         }
     }
 
+    private func persistMCPToolApproval(serverID: String, toolName: String) -> Bool {
+        let configPath = ConfigInstaller.codexHome() + "/config.toml"
+        let configDirectory = (configPath as NSString).deletingLastPathComponent
+        let targetPath = ["mcp_servers", serverID, "tools", toolName]
+
+        do {
+            try fileManager.createDirectory(atPath: configDirectory, withIntermediateDirectories: true)
+            let existing = (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? ""
+            let updated = Self.configWithMCPToolApproval(
+                existing,
+                tablePath: targetPath,
+                comment: #"Added by CodeIsland when "Always Allow" is clicked for a Codex MCP tool."#
+            )
+            try updated.write(toFile: configPath, atomically: true, encoding: .utf8)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    static func mcpToolApprovalTarget(for event: HookEvent) -> (serverID: String, toolName: String)? {
+        guard isCodexEvent(event),
+              let rawToolName = event.toolName,
+              rawToolName.hasPrefix("mcp__") else {
+            return nil
+        }
+
+        let rest = String(rawToolName.dropFirst("mcp__".count))
+        guard let separator = rest.range(of: "__") else { return nil }
+        let serverID = String(rest[..<separator.lowerBound])
+        let toolName = String(rest[separator.upperBound...])
+        guard !serverID.isEmpty, !toolName.isEmpty else { return nil }
+        return (serverID, toolName)
+    }
+
+    static func configWithMCPToolApproval(_ contents: String, tablePath: [String], comment: String) -> String {
+        var lines = contents.components(separatedBy: .newlines)
+        if contents.hasSuffix("\n") {
+            lines.removeLast()
+        }
+
+        if let headerIndex = lines.firstIndex(where: { tomlTableSegments(from: $0) == tablePath }) {
+            let endIndex = lines[(headerIndex + 1)...].firstIndex(where: { tomlTableSegments(from: $0) != nil })
+                ?? lines.endIndex
+            if let approvalIndex = lines[(headerIndex + 1)..<endIndex].firstIndex(where: { tomlKey(from: $0) == "approval_mode" }) {
+                lines[approvalIndex] = #"approval_mode = "approve""#
+            } else {
+                lines.insert(#"approval_mode = "approve""#, at: headerIndex + 1)
+            }
+        } else {
+            if !lines.isEmpty, lines.last?.isEmpty == false {
+                lines.append("")
+            }
+            lines.append("# \(comment)")
+            lines.append("[\(tablePath.map(tomlKeySegment).joined(separator: "."))]")
+            lines.append(#"approval_mode = "approve""#)
+        }
+
+        return lines.joined(separator: "\n") + "\n"
+    }
+
     private static func patternLine(for pattern: [String]) -> String {
-        "pattern=[\(pattern.map(quotedRuleString).joined(separator: ", "))]"
+        "pattern = [\(pattern.map(quotedRuleString).joined(separator: ", "))]"
     }
 
     private static func ruleBlock(for pattern: [String]) -> String {
@@ -126,12 +191,19 @@ struct CodexPermissionRules {
     private static func ruleBlock(patternLine: String) -> String {
         """
         # Added by CodeIsland when "Always Allow" is clicked for Codex.
-        prefix_rule(\(patternLine), decision="allow", justification="Allowed from CodeIsland Always Allow")
+        prefix_rule(
+            \(patternLine),
+            decision = "allow",
+            justification = "Allowed from CodeIsland Always Allow",
+        )
 
         """
     }
 
     private static func quotedRuleString(_ value: String) -> String {
+        // Escape by unicode scalar rather than a chain of replacingOccurrences:
+        // this also covers \t and every other control character below 0x20, which
+        // Starlark rejects raw inside a double-quoted string (#252 + follow-up).
         var escaped = ""
         for scalar in value.unicodeScalars {
             switch scalar {
@@ -156,9 +228,13 @@ struct CodexPermissionRules {
         return "\"\(escaped)\""
     }
 
+    /// Whitespace-insensitive so a rules file written by an older CodeIsland
+    /// (compact `pattern=[…], decision="allow"`) still dedupes against the
+    /// current spaced format instead of being appended a second time.
     private static func containsAllowRule(patternLine: String, in contents: String) -> Bool {
-        contents.contains(patternLine)
-            && contents.contains(#"decision="allow""#)
+        let compactContents = contents.filter { !$0.isWhitespace }
+        return compactContents.contains(patternLine.filter { !$0.isWhitespace })
+            && compactContents.contains(#"decision="allow""#)
     }
 
     private static func sanitizedExistingRules(_ contents: String) -> String {
@@ -176,7 +252,7 @@ struct CodexPermissionRules {
             let compactWindow = window.filter { !$0.isWhitespace }
             guard compactWindow.contains(#"decision="allow""#) else { continue }
 
-            let patternLine = "pattern=\(arrayExpression)"
+            let patternLine = "pattern = \(arrayExpression)"
             guard seenPatterns.insert(patternLine).inserted else { continue }
             blocks.append(ruleBlock(patternLine: patternLine))
         }
@@ -301,6 +377,71 @@ struct CodexPermissionRules {
         }
 
         return String(trimmed.dropFirst().dropLast())
+    }
+
+    private static func tomlKey(from line: String) -> String? {
+        let stripped = stripTomlComment(line).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let equals = stripped.firstIndex(of: "=") else { return nil }
+        return String(stripped[..<equals]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func tomlTableSegments(from line: String) -> [String]? {
+        let trimmed = stripTomlComment(line).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("["),
+              trimmed.hasSuffix("]"),
+              !trimmed.hasPrefix("[[") else {
+            return nil
+        }
+
+        let body = String(trimmed.dropFirst().dropLast())
+        var segments: [String] = []
+        var current = ""
+        var quote: Character?
+        var escaping = false
+
+        func appendSegment() {
+            let segment = current.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !segment.isEmpty {
+                segments.append(segment)
+            }
+            current = ""
+        }
+
+        for ch in body {
+            if let activeQuote = quote {
+                if escaping {
+                    current.append(ch)
+                    escaping = false
+                } else if activeQuote == "\"", ch == "\\" {
+                    escaping = true
+                } else if ch == activeQuote {
+                    quote = nil
+                } else {
+                    current.append(ch)
+                }
+                continue
+            }
+
+            if ch == "\"" || ch == "'" {
+                quote = ch
+            } else if ch == "." {
+                appendSegment()
+            } else {
+                current.append(ch)
+            }
+        }
+        appendSegment()
+        return segments.isEmpty ? nil : segments
+    }
+
+    private static func tomlKeySegment(_ value: String) -> String {
+        if value.range(of: #"^[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil {
+            return value
+        }
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
     }
 
     private static func findSuggestedPrefixRule(in value: Any) -> [String]? {

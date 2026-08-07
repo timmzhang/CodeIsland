@@ -35,6 +35,7 @@ CodeIsland 住在你 MacBook 的刘海区域，实时展示 AI 编码 Agent 的�
 - **智能通知抑制** — 标签页级终端检测：只在你正在看该会话的标签页时抑制通知，而不是整个终端应用
 - **音效提示** — 可选的 8-bit 风格音效通知
 - **自动安装 Hook** — 自动为所有检测到的 CLI 工具配置 hooks，支持自动修复和版本追踪
+- **iPhone 与 Apple Watch Buddy** — 将会话状态同步到灵动岛、锁屏、StandBy 和 Apple Watch
 - **中英双语** — 支持中文和英文，自动跟随系统语言
 - **多显示器** — 支持外接显示器，自动检测刘海屏幕
 
@@ -73,6 +74,16 @@ brew install --cask codeisland
 
 > **提示：** 首次启动时 macOS 可能弹出安全提示，前往 **系统设置 → 隐私与安全性** 点击 **仍要打开** 即可。
 
+### iPhone 与 Apple Watch Buddy
+
+Code Island Buddy 已在 App Store 上架：
+
+[下载 Code Island Buddy](https://apps.apple.com/us/app/code-island-buddy/id6773881129)
+
+iPhone App 可以把 Mac 上的会话状态同步到灵动岛、锁屏、StandBy 和 Apple Watch。它的工作方式很轻量：iPhone App 前台打开时，Mac 端通过本地网络发送会话快照；需要后台刷新实时活动和手表状态时，则通过蓝牙发送压缩后的状态摘要。
+
+Code Island Buddy 完全免费，并且开源。它不需要账号，也不依赖外部服务器；伴随端源码就在本仓库的 `ios/CodeIslandCompanion` 和 `apple-companion` 目录中。
+
 ### 从源码构建
 
 需要 **macOS 14+** 和 **Swift 5.9+**。
@@ -102,6 +113,7 @@ AI 工具 (Claude/Codex/Gemini/Cursor/...)
       → Unix socket → /tmp/codeisland-<uid>.sock
         → CodeIsland 接收事件
           → 实时更新 UI
+          → 可选同步到 iPhone / Apple Watch Buddy
 ```
 
 CodeIsland 在每个 AI 工具的配置中安装轻量级 hooks。当工具触发事件（会话开始、工具调用、权限请求等）时，hook 通过 Unix socket 发送 JSON 消息。CodeIsland 监听此 socket 并即时更新刘海面板。
@@ -119,6 +131,16 @@ CodeIsland 提供 7 个标签页的设置面板：
 - **声音** — 8-bit 风格音效通知
 - **Hooks** — 查看 CLI 安装状态、重新安装或卸载 hooks
 - **关于** — 版本信息和链接
+
+## 键盘快捷键
+
+| 快捷键 | 功能 | 默认 |
+|--------|------|------|
+| ⌘⇧I | 展开 / 收起灵动岛面板 | 开启 |
+| ⌘⇧A | 批准当前审批请求 | 关闭 |
+| ⌘⇧D | 拒绝当前审批请求 | 关闭 |
+
+所有快捷键都可以在 **设置 → 快捷键** 中自定义，还可以为「总是允许」「跳过提问」「跳转到终端」绑定按键。启用批准/拒绝快捷键后，对应键位会以角标形式直接显示在审批卡片按钮上。
 
 ## 系统要求
 

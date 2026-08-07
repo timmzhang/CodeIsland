@@ -1,10 +1,87 @@
 import SwiftUI
 import CodeIslandCore
 
+/// Shared bounds for the collapsed-width scale setting — keeps the settings
+/// slider and the width math in lockstep. Percent of the (simulated) notch width.
+enum NotchWidthScale {
+    static let min = 50
+    static let max = 150
+    static let step = 1
+}
+
 enum NotchWidthMetrics {
-    static func effectiveNotchWidth(notchW: CGFloat, collapsedWidthScale: Int) -> CGFloat {
-        let clampedScale = max(50, min(collapsedWidthScale, 150))
-        return notchW * CGFloat(clampedScale) / 100.0
+    /// On notched displays the island can grow beyond the physical notch but never
+    /// shrink under it — narrower would expose the bare hardware cutout (#268).
+    static func effectiveNotchWidth(notchW: CGFloat, collapsedWidthScale: Int, hasNotch: Bool) -> CGFloat {
+        let clampedScale = Swift.max(NotchWidthScale.min, Swift.min(collapsedWidthScale, NotchWidthScale.max))
+        let scaled = notchW * CGFloat(clampedScale) / 100.0
+        if hasNotch { return Swift.max(notchW, scaled) }
+        return scaled
+    }
+}
+
+// MARK: - Hover interaction state machine
+
+/// Where the island is in its hover interaction. `prehover` is the immediate
+/// lightweight acknowledgement (slight widen + scale) shown while the expand
+/// delay is still running — a quick mouse pass-through only ever plays this
+/// first stage and reverses, instead of popping the full panel open.
+enum NotchHoverPhase {
+    case collapsed
+    case prehover
+    case expanded
+}
+
+enum NotchHoverEvent {
+    case mouseEntered
+    case mouseExited
+    case expandDelayElapsed
+    case collapseDelayElapsed
+}
+
+enum NotchHoverInteraction {
+    static let prehoverAnimationDuration: TimeInterval = 0.21
+    static let expandDelay: TimeInterval = 0.5
+    static let collapseDelay: TimeInterval = 0.5
+    static let prehoverWidthDelta: CGFloat = 7
+    static let prehoverScale: CGFloat = 1.004
+
+    static func nextPhase(from phase: NotchHoverPhase, event: NotchHoverEvent) -> NotchHoverPhase {
+        switch (phase, event) {
+        case (.collapsed, .mouseEntered):
+            return .prehover
+        case (.prehover, .mouseExited):
+            return .collapsed
+        case (.prehover, .expandDelayElapsed):
+            return .expanded
+        case (.expanded, .collapseDelayElapsed):
+            return .collapsed
+        default:
+            return phase
+        }
+    }
+}
+
+enum ToolNameDisplay {
+    static let compactMaxCharacters = 24
+    static let compactMaxWidth: CGFloat = 120
+
+    static func compact(_ tool: String, maxCharacters: Int = compactMaxCharacters) -> String {
+        let trimmed = tool.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard maxCharacters > 3, trimmed.count > maxCharacters else { return trimmed }
+
+        let components = trimmed.components(separatedBy: "__")
+        let meaningfulSuffix: String?
+        if components.count > 1, let last = components.last, !last.isEmpty {
+            meaningfulSuffix = last
+        } else {
+            meaningfulSuffix = nil
+        }
+        let minimumPrefixCount = max(1, min(4, maxCharacters - 4))
+        let suffixBudget = max(1, maxCharacters - minimumPrefixCount - 3)
+        let suffixCount = meaningfulSuffix.map { min($0.count, suffixBudget) } ?? max(4, maxCharacters / 2)
+        let prefixCount = max(1, maxCharacters - suffixCount - 3)
+        return "\(trimmed.prefix(prefixCount))...\(trimmed.suffix(suffixCount))"
     }
 }
 
@@ -103,6 +180,8 @@ struct NotchPanelView: View {
     @State private var hoverTimer: Timer?
     @State private var isHovered = false
     @State private var idleHovered = false
+    /// Three-stage hover: collapsed → prehover (immediate ack) → expanded (after delay)
+    @State private var hoverPhase: NotchHoverPhase = .collapsed
     /// Curtain animation for tool status toggle
     @State private var curtainOffset: CGFloat = 0
     @State private var curtainOpacity: Double = 1
@@ -135,6 +214,11 @@ struct NotchPanelView: View {
             surface: appState.surface
         )
     }
+    /// Prehover acknowledgement is only rendered on the collapsed active bar —
+    /// once the surface expands (from hover or any other path) it disappears.
+    private var shouldShowPrehover: Bool {
+        showBar && !shouldShowExpanded && hoverPhase == .prehover
+    }
 
     /// Mascot size — fits within the menu bar height
     private var mascotSize: CGFloat { min(27, notchHeight - 6) }
@@ -142,11 +226,12 @@ struct NotchPanelView: View {
     /// Minimum wing width needed to display compact bar content
     private var compactWingWidth: CGFloat { mascotSize + 14 }
 
-    /// Effective island width — applies user scale on both notch and non-notch screens.
+    /// Effective island width — on notched screens the scale can only widen past the notch.
     private var effectiveNotchW: CGFloat {
         NotchWidthMetrics.effectiveNotchWidth(
             notchW: notchW,
-            collapsedWidthScale: collapsedWidthScale
+            collapsedWidthScale: collapsedWidthScale,
+            hasNotch: hasNotch
         )
     }
 
@@ -161,7 +246,9 @@ struct NotchPanelView: View {
         let extra: CGFloat = appState.status == .idle ? 0 : 20
         // Reserve space for tool status — proportional to screen width
         let toolExtra: CGFloat = displayedToolStatus ? (hasNotch ? screenWidth * 0.03 : screenWidth * 0.04) : 0
-        return nw + wing * 2 + extra + toolExtra
+        // Immediate hover acknowledgement: a slight widen while the expand delay runs
+        let prehoverExtra: CGFloat = shouldShowPrehover ? NotchHoverInteraction.prehoverWidthDelta : 0
+        return nw + wing * 2 + extra + toolExtra + prehoverExtra
     }
 
     var body: some View {
@@ -302,6 +389,7 @@ struct NotchPanelView: View {
                 }
             }
             .onAppear { displayedToolStatus = showToolStatus }
+            .scaleEffect(shouldShowPrehover ? NotchHoverInteraction.prehoverScale : 1, anchor: .top)
             .contentShape(Rectangle())
             .onHover { hovering in
                 // Idle indicator hover — delay un-hover to prevent oscillation when
@@ -355,9 +443,14 @@ struct NotchPanelView: View {
                 if hovering {
                     // Back on the panel — any collapse deferred to the popover is off
                     pendingCollapseAfterPopover = false
-                    // Delay expansion to avoid accidental triggers
+                    // Immediate lightweight acknowledgement; a quick pass-through
+                    // only ever plays this first stage and reverses.
+                    withAnimation(NotchAnimation.hoverPrehover) {
+                        hoverPhase = NotchHoverInteraction.nextPhase(from: hoverPhase, event: .mouseEntered)
+                    }
+                    // Delay full expansion to avoid accidental triggers
                     hoverTimer?.invalidate()
-                    hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
+                    hoverTimer = Timer.scheduledTimer(withTimeInterval: NotchHoverInteraction.expandDelay, repeats: false) { _ in
                         Task { @MainActor in
                             // Guard: mouse may have left during the delay
                             guard isHovered else { return }
@@ -375,6 +468,7 @@ struct NotchPanelView: View {
                                     performer.perform(.alignment, performanceTime: .default)
                                 }
                             }
+                            hoverPhase = NotchHoverInteraction.nextPhase(from: hoverPhase, event: .expandDelayElapsed)
                             withAnimation(NotchAnimation.open) {
                                 appState.surface = .sessionList
                                 appState.cancelCompletionQueue()
@@ -385,9 +479,14 @@ struct NotchPanelView: View {
                         }
                     }
                 } else {
-                    // Collapse with brief delay to prevent flicker on accidental mouse-out
+                    // Reverse the prehover acknowledgement right away…
+                    withAnimation(NotchAnimation.hoverPrehover) {
+                        hoverPhase = NotchHoverInteraction.nextPhase(from: hoverPhase, event: .mouseExited)
+                    }
+                    // …and collapse an expanded panel after a grace delay so an
+                    // accidental mouse-out doesn't flicker it shut.
                     hoverTimer?.invalidate()
-                    hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { _ in
+                    hoverTimer = Timer.scheduledTimer(withTimeInterval: NotchHoverInteraction.collapseDelay, repeats: false) { _ in
                         Task { @MainActor in
                             guard !isHovered else { return }
                             // The usage popover extends below the retracted panel —
@@ -398,6 +497,7 @@ struct NotchPanelView: View {
                                 pendingCollapseAfterPopover = true
                                 return
                             }
+                            hoverPhase = NotchHoverInteraction.nextPhase(from: hoverPhase, event: .collapseDelayElapsed)
                             withAnimation(NotchAnimation.close) {
                                 appState.surface = .collapsed
                             }
@@ -419,6 +519,13 @@ struct NotchPanelView: View {
                 if newSurface == .collapsed || newSurface == .usageDetail {
                     usagePopover.dismiss()
                     pendingCollapseAfterPopover = false
+                }
+                // The surface can change from outside the hover flow (auto-expand
+                // cards, click-to-close, …) — keep the phase from going stale.
+                if newSurface == .collapsed && !isHovered {
+                    hoverPhase = .collapsed
+                } else if newSurface.isExpanded && hoverPhase != .expanded {
+                    hoverPhase = .expanded
                 }
             }
             .onChange(of: usagePopover.autoHideCount) { _, _ in
@@ -514,12 +621,14 @@ private struct CompactLeftWing: View {
 
                 // On notch screens, show tool name only (no description, space is tight)
                 if hasNotch, showToolStatus, let tool = shownTool {
-                    Text(tool)
+                    Text(ToolNameDisplay.compact(tool))
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundStyle(toolStatusColor(tool))
                         .lineLimit(1)
-                        .fixedSize()
+                        .truncationMode(.middle)
+                        .frame(maxWidth: ToolNameDisplay.compactMaxWidth, alignment: .leading)
                         .transition(.opacity)
+                        .help(tool)
                 }
             }
         }
@@ -556,6 +665,21 @@ private struct CompactRightWing: View {
     @ObservedObject private var l10n = L10n.shared
     @AppStorage(SettingsKey.soundEnabled) private var soundEnabled = SettingsDefaults.soundEnabled
     @AppStorage(SettingsKey.showToolStatus) private var showToolStatus = SettingsDefaults.showToolStatus
+    @AppStorage(SettingsKey.quietHoursEnabled) private var quietHoursEnabled = SettingsDefaults.quietHoursEnabled
+    @AppStorage(SettingsKey.quietHoursStart) private var quietHoursStart = SettingsDefaults.quietHoursStart
+    @AppStorage(SettingsKey.quietHoursEnd) private var quietHoursEnd = SettingsDefaults.quietHoursEnd
+
+    /// Re-evaluated on every re-render; the compact bar redraws often enough
+    /// that the moon appears/disappears close to the window edges.
+    private var inQuietHours: Bool {
+        guard soundEnabled, quietHoursEnabled else { return false }
+        let c = Calendar.current.dateComponents([.hour, .minute], from: Date())
+        return SoundManager.isInQuietHours(
+            minutesSinceMidnight: (c.hour ?? 0) * 60 + (c.minute ?? 0),
+            start: quietHoursStart,
+            end: quietHoursEnd
+        )
+    }
 
     private var displaySessionId: String? {
         appState.rotatingSessionId ?? appState.activeSessionId ?? appState.sessions.keys.sorted().first
@@ -585,6 +709,23 @@ private struct CompactRightWing: View {
                     NSApplication.shared.terminate(nil)
                 }
             } else {
+                // Quiet hours active — explains why event sounds are silent.
+                if inQuietHours {
+                    Image(systemName: "moon.fill")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.35))
+                        .help(l10n["quiet_hours"])
+                }
+
+                // Glance completion dot — an agent finished while collapsed;
+                // cleared as soon as the panel expands.
+                if appState.glanceCompletionActive {
+                    Circle()
+                        .fill(Color(red: 0.4, green: 1.0, blue: 0.5))
+                        .frame(width: 7, height: 7)
+                        .shadow(color: Color(red: 0.4, green: 1.0, blue: 0.5).opacity(0.7), radius: 3)
+                }
+
                 // Pending approval/question badge
                 if appState.status == .waitingApproval || appState.status == .waitingQuestion {
                     Image(systemName: "bell.fill")
@@ -696,8 +837,9 @@ private struct CompactToolStatus: View {
 
             // Tool status or thinking indicator
             if let tool = shownTool {
-                TypingIndicator(fontSize: 11, label: tool, bright: true, color: toolStatusColor(tool))
+                TypingIndicator(fontSize: 11, label: ToolNameDisplay.compact(tool, maxCharacters: 32), bright: true, color: toolStatusColor(tool))
                     .id("tool-\(tool)-\(appState.rotatingSessionId ?? "")")
+                    .help(tool)
                 if let desc = shownDesc {
                     MorphText(
                         text: shortDesc(desc),
@@ -786,12 +928,13 @@ private struct IdleIndicatorBar: View {
     let hovered: Bool
     @ObservedObject private var l10n = L10n.shared
     @AppStorage(SettingsKey.soundEnabled) private var soundEnabled = SettingsDefaults.soundEnabled
+    @AppStorage(SettingsKey.defaultSource) private var defaultSource = SettingsDefaults.defaultSource
 
     var body: some View {
         HStack(spacing: 0) {
             // Left: mascot
             HStack(spacing: 6) {
-                MascotView(source: "claude", status: .idle, size: mascotSize)
+                MascotView(source: defaultSource, status: .idle, size: mascotSize)
                     .opacity(hovered ? 0.9 : 0.5)
             }
             .padding(.leading, 6)
@@ -1070,13 +1213,13 @@ private struct ApprovalBar: View {
                     .onTapGesture { handleCardClick() }
             }
 
-            // Pixel-style buttons
+            // Pixel-style buttons — badge the global shortcut when one is enabled
             HStack(spacing: 6) {
-                PixelButton(label: L10n.shared["deny"], fg: .white.opacity(0.95), bg: Color(red: 0.45, green: 0.12, blue: 0.12), border: Color(red: 0.7, green: 0.25, blue: 0.25), action: onDeny)
+                PixelButton(label: L10n.shared["deny"], fg: .white.opacity(0.95), bg: Color(red: 0.45, green: 0.12, blue: 0.12), border: Color(red: 0.7, green: 0.25, blue: 0.25), hint: Self.shortcutHint(.deny), action: onDeny)
                 PixelButton(label: L10n.shared["dismiss"], fg: .white.opacity(0.95), bg: Color(red: 0.25, green: 0.25, blue: 0.25), border: Color.white.opacity(0.28), action: onDismiss)
-                PixelButton(label: L10n.shared["allow_once"], fg: .white.opacity(0.95), bg: Color(red: 0.16, green: 0.38, blue: 0.18), border: Color(red: 0.28, green: 0.62, blue: 0.32), action: onAllow)
+                PixelButton(label: L10n.shared["allow_once"], fg: .white.opacity(0.95), bg: Color(red: 0.16, green: 0.38, blue: 0.18), border: Color(red: 0.28, green: 0.62, blue: 0.32), hint: Self.shortcutHint(.approve), action: onAllow)
                 if showsAlwaysAllow {
-                    PixelButton(label: L10n.shared["always"], fg: .white.opacity(0.95), bg: Color(red: 0.14, green: 0.28, blue: 0.52), border: Color(red: 0.28, green: 0.48, blue: 0.82), action: onAlwaysAllow)
+                    PixelButton(label: L10n.shared["always"], fg: .white.opacity(0.95), bg: Color(red: 0.14, green: 0.28, blue: 0.52), border: Color(red: 0.28, green: 0.48, blue: 0.82), hint: Self.shortcutHint(.approveAlways), action: onAlwaysAllow)
                 }
             }
             .padding(.horizontal, 14)
@@ -1096,6 +1239,13 @@ private struct ApprovalBar: View {
     /// - nil session: play error sound + shake animation
     /// - remote session: skip (no terminal to jump to)
     /// - valid local session: activate terminal + optionally auto-collapse
+    /// Badge text for a global shortcut, shown only when the user has enabled
+    /// it in Settings — the shortcut existed but nothing surfaced it (#12 UX).
+    static func shortcutHint(_ action: ShortcutAction) -> String? {
+        guard action.isEnabled else { return nil }
+        return action.binding.displayString
+    }
+
     private func handleCardClick() {
         // Session may be nil if removed while card is still visible
         guard let session = session else {
@@ -1666,24 +1816,34 @@ private struct PixelButton: View {
     let fg: Color
     let bg: Color
     let border: Color
+    /// Optional keyboard-shortcut badge (e.g. "⌘⇧A") — discoverability for the
+    /// global approve/deny shortcuts that already exist in Settings (#12 UX).
+    var hint: String? = nil
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            Text(label)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(fg)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 7)
-                .background(
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(hovering ? bg.opacity(1.5) : bg)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4)
-                        .strokeBorder(hovering ? border : border.opacity(0.4), lineWidth: 1)
-                )
+            HStack(spacing: 4) {
+                Text(label)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(fg)
+                if let hint {
+                    Text(hint)
+                        .font(.system(size: 8, weight: .medium, design: .monospaced))
+                        .foregroundStyle(fg.opacity(0.55))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(hovering ? bg.opacity(1.5) : bg)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(hovering ? border : border.opacity(0.4), lineWidth: 1)
+            )
         }
         .buttonStyle(.plain)
         .onHover { h in withAnimation(NotchAnimation.micro) { hovering = h } }
@@ -1734,27 +1894,39 @@ private struct SessionListView: View {
                 ("codex", "Codex"),
                 ("gemini", "Gemini"),
                 ("antigravity", "AntiGravity"),
+                ("google-antigravity", "Google Antigravity"),
                 ("cursor", "Cursor"),
                 ("trae", "Trae"),
                 ("traecn", "Trae CN"),
                 ("traecli", "Trae CLI"),
                 ("copilot", "Copilot"),
                 ("qoder", "Qoder"),
+                ("qoderwork", "QoderWork"),
                 ("droid", "Factory"),
                 ("codebuddy", "CodeBuddy"),
                 ("codybuddycn", "CodyBuddyCN"),
                 ("stepfun", "StepFun"),
                 ("workbuddy", "WorkBuddy"),
                 ("hermes", "Hermes"),
+                ("openclaw", "OpenClaw"),
                 ("qwen", "Qwen Code"),
                 ("kimi", "Kimi Code CLI"),
                 ("opencode", "OpenCode"),
+                ("pi", "Pi"),
+                ("kiro", "Kiro"),
+                ("cline", "Cline"),
+                ("zcode", "ZCode"),
             ]
             var result: [(String, String?, [String])] = []
             var seen = Set<String>()
             for cli in cliOrder {
                 let ids = sorted.filter { id in
-                    appState.sessions[id]?.source == cli.source
+                    guard let source = appState.sessions[id]?.source else { return false }
+                    if source == cli.source { return true }
+                    // Bundle promoted -cli variants with their IDE group (#248).
+                    if cli.source == "cursor", source == "cursor-cli" { return true }
+                    if cli.source == "qoder", source == "qoder-cli" { return true }
+                    return false
                 }
                 ids.forEach { seen.insert($0) }
                 if !ids.isEmpty {
@@ -1821,19 +1993,21 @@ private struct SessionListView: View {
         }
         .padding(.vertical, 4)
 
-        if needsScroll {
-            ThinScrollView(maxHeight: CGFloat(maxVisibleSessions) * 90) {
+        VStack(spacing: 0) {
+            if needsScroll {
+                ThinScrollView(maxHeight: CGFloat(maxVisibleSessions) * 90) {
+                    content
+                }
+                .clipShape(
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: 0, bottomLeadingRadius: 20,
+                        bottomTrailingRadius: 20, topTrailingRadius: 0,
+                        style: .continuous
+                    )
+                )
+            } else {
                 content
             }
-            .clipShape(
-                UnevenRoundedRectangle(
-                    topLeadingRadius: 0, bottomLeadingRadius: 20,
-                    bottomTrailingRadius: 20, topTrailingRadius: 0,
-                    style: .continuous
-                )
-            )
-        } else {
-            content
         }
     }
 }
@@ -1883,6 +2057,7 @@ private struct SessionIdentityLine: View {
     let sessionFontSize: CGFloat
     let sessionColor: Color
     let dividerColor: Color
+    @AppStorage(SettingsKey.showGitBranch) private var showGitBranch = SettingsDefaults.showGitBranch
 
     private var displaySessionId: String { session.displaySessionId(sessionId: sessionId) }
 
@@ -1896,6 +2071,19 @@ private struct SessionIdentityLine: View {
                 color: projectColor
             )
             .layoutPriority(2)
+
+            if showGitBranch, let branch = session.gitBranch {
+                HStack(spacing: 2) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: max(sessionFontSize - 1, 8), weight: .semibold))
+                    Text(session.gitIsWorktree ? "\(branch) ⧉" : branch)
+                        .font(.system(size: sessionFontSize, weight: .medium, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .foregroundStyle(sessionColor.opacity(0.85))
+                .layoutPriority(1)
+            }
 
             if let sessionLabel = session.sessionLabel {
                 Text("#\(sessionLabel)")
@@ -2063,6 +2251,11 @@ private struct SessionCard: View {
         appState.permissionQueue.firstIndex { ($0.event.sessionId ?? "default") == sessionId }
     }
     private var isActiveApproval: Bool { approvalQueueIndex == 0 }
+    /// Cursor is blocked on a question answered inside its own UI (#265) —
+    /// a display-only wait with no in-panel answer flow.
+    private var showsExternalCursorQuestion: Bool {
+        session.status == .waitingQuestion && session.cursorPendingQuestion != nil
+    }
     private var statusNameColor: Color {
         if session.status == .idle && session.interrupted {
             return Color(red: 1.0, green: 0.45, blue: 0.35)
@@ -2242,6 +2435,29 @@ private struct SessionCard: View {
                     }
                 }
 
+                // Cursor asked a question in its own UI (#265). There is no hook
+                // channel to answer from here, so show the question plus a hint
+                // instead of an endless "thinking" indicator.
+                if showsExternalCursorQuestion {
+                    VStack(alignment: .leading, spacing: 3) {
+                        if let question = session.cursorPendingQuestion, !question.isEmpty {
+                            HStack(alignment: .top, spacing: 5) {
+                                Text("?")
+                                    .font(.system(size: fontSize, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(Color(red: 1.0, green: 0.6, blue: 0.2))
+                                Text(question)
+                                    .font(.system(size: fontSize, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .lineLimit(2)
+                                    .truncationMode(.tail)
+                            }
+                        }
+                        Text(L10n.shared["cursor_question_answer_hint"])
+                            .font(.system(size: max(10, fontSize - 1), design: .monospaced))
+                            .foregroundStyle(Color(red: 1.0, green: 0.6, blue: 0.2).opacity(0.85))
+                    }
+                }
+
                 // Session title: first user prompt (hide when detailed mode shows chat history)
                 if let prompt = session.lastUserPrompt,
                    session.recentMessages.isEmpty {
@@ -2270,8 +2486,10 @@ private struct SessionCard: View {
                         )
                     }
 
-                    // Working indicator: show what AI is doing right now
-                    if session.status != .idle {
+                    // Working indicator: show what AI is doing right now.
+                    // Suppressed while a Cursor-side question is pending — the
+                    // question block above already explains the wait (#265).
+                    if session.status != .idle && !showsExternalCursorQuestion {
                         HStack(spacing: 4) {
                             Text("$")
                                 .font(.system(size: fontSize, weight: .bold, design: .monospaced))
@@ -2733,12 +2951,17 @@ private let cliIconFiles: [String: String] = [
     "codex": "codex",
     "gemini": "gemini",
     "antigravity": "antigravity",
+    "google-antigravity": "gemini",
     "cursor": "cursor",
+    "cursor-cli": "cursor",
     "trae": "trae",
     "traecn": "trae",
     "traecli": "trae",
+    "traecli-next": "trae",
     "copilot": "copilot",
     "qoder": "qoder",
+    "qoder-cli": "qoder",
+    "qoderwork": "qoder",
     "droid": "factory",
     "codebuddy": "codebuddy",
     "codybuddycn": "codebuddy",
@@ -2747,8 +2970,14 @@ private let cliIconFiles: [String: String] = [
     "hermes": "hermes",
     "qwen": "qwen",
     "kimi": "kimi",
+    "pi": "pi",
+    "omp": "pi",
     "opencode": "opencode",
     "cline": "cline",
+    // Rendered from the in-house pixel mascots via
+    // MascotRenderHarness/testRenderCliIcons (MASCOT_ICON_DIR=…).
+    "kiro": "kiro",
+    "openclaw": "openclaw",
 ]
 
 private var cliIconCache: [String: NSImage] = [:]
@@ -2759,9 +2988,45 @@ func cliIcon(source: String, size: CGFloat = 16) -> NSImage? {
     guard let filename = cliIconFiles[source],
           let url = Bundle.appModule.url(forResource: filename, withExtension: "png", subdirectory: "Resources/cli-icons"),
           let image = NSImage(contentsOf: url)
-    else { return nil }
+    else {
+        // No asset (new integrations, custom CLIs): draw a monogram tile so
+        // every row in the settings CLI list still gets an icon.
+        let fallback = monogramIcon(for: source, size: size)
+        cliIconCache[key] = fallback
+        return fallback
+    }
     image.size = NSSize(width: size, height: size)
     cliIconCache[key] = image
+    return image
+}
+
+/// Rounded tile with the source's first letter; hue derived from the source
+/// name so distinct CLIs get stable, distinct colors.
+private func monogramIcon(for source: String, size: CGFloat) -> NSImage {
+    let letter = String(source.trimmingCharacters(in: CharacterSet(charactersIn: ".")).prefix(1)).uppercased()
+    // Deterministic hash — Swift's hashValue is seeded per launch and would
+    // repaint the tile a different color every run.
+    let stableHash = source.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0x7FFF_FFFF }
+    let hue = Double(stableHash % 360) / 360.0
+    let scale: CGFloat = 4  // draw at 4x so small sizes stay crisp
+    let px = size * scale
+    let image = NSImage(size: NSSize(width: px, height: px), flipped: false) { rect in
+        let bg = NSColor(hue: hue, saturation: 0.55, brightness: 0.72, alpha: 1)
+        NSBezierPath(roundedRect: rect.insetBy(dx: px * 0.02, dy: px * 0.02),
+                     xRadius: px * 0.22, yRadius: px * 0.22).addClip()
+        bg.setFill()
+        rect.fill()
+        let font = NSFont.systemFont(ofSize: px * 0.58, weight: .bold)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.white,
+        ]
+        let text = NSAttributedString(string: letter, attributes: attrs)
+        let textSize = text.size()
+        text.draw(at: NSPoint(x: (px - textSize.width) / 2, y: (px - textSize.height) / 2))
+        return true
+    }
+    image.size = NSSize(width: size, height: size)
     return image
 }
 

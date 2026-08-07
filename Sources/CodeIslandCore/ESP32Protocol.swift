@@ -240,11 +240,14 @@ public enum MascotID: UInt8, CaseIterable, Sendable {
         switch canonical {
         case "claude":                               self = .claude
         case "codex":                                self = .codex
-        case "gemini":                               self = .gemini
+        // Google Antigravity is Gemini-based; fold it onto the Gemini Buddy slot
+        // (the 16 firmware mascot slots are all assigned). Mirrors how cursor-cli
+        // folds onto .cursor (#215).
+        case "gemini", "google-antigravity":         self = .gemini
         case "cursor", "cursor-cli":                 self = .cursor
         case "copilot":                              self = .copilot
         case "trae", "traecn", "traecli":            self = .trae
-        case "qoder", "qoder-cli":                   self = .qoder
+        case "qoder", "qoder-cli", "qoderwork":      self = .qoder
         case "droid":                                self = .droid
         case "codebuddy", "codybuddycn":             self = .codebuddy
         case "stepfun":                              self = .stepfun

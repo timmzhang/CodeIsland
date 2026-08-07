@@ -23,11 +23,15 @@ enum HookFormat {
     case nested
     /// Cursor style: [{command: "..."}]
     case flat
+    /// Trae IDE / Trae CN style:
+    /// {version, hooks: {event: [{matcher, loop_limit, hooks: [{type, command, timeout}]}]}}
+    case traeIDE
     /// TraeCli style: YAML managed block in ~/.trae/traecli.yaml
     case traecli
     /// GitHub Copilot CLI style: [{type, bash, timeoutSec}] with top-level version
     case copilot
-    /// Kimi Code CLI style: TOML [[hooks]] arrays in ~/.kimi/config.toml
+    /// Kimi Code CLI style: TOML [[hooks]] arrays in ~/.kimi-code/config.toml
+    /// (legacy kimi-cli used ~/.kimi/config.toml).
     case kimi
     /// Kiro CLI style: per-agent JSON file at ~/.kiro/agents/<name>.json
     /// with hooks keyed by camelCase event names and `timeout_ms` (#127).
@@ -37,18 +41,46 @@ enum HookFormat {
     case none
     /// Cline: per-event executable files in ~/Documents/Cline/Hooks/<EventName>
     case cline
+    /// Hermes (Nous Research) style: YAML managed block in ~/.hermes/config.yaml
+    /// where `hooks:` is a MAP of snake_case event names -> list of
+    /// {matcher?, command, timeout?}. Diverged from Claude — not a fork (#226).
+    case hermes
+    /// Google Antigravity (Gemini-based IDE/CLI) — a standalone
+    /// ~/.gemini/config/hooks.json wrapped in a NAMED-CONFIG object:
+    /// { "<name>": { "<Event>": [ {matcher?, hooks:[{type,command,timeout}]} ] } }.
+    /// Differs from `.nested` only by the outer name wrapper (the inner entry is
+    /// keyed directly under `root[configKey]` by `installExternalHooks`, so the
+    /// configKey IS the wrapper name "codeisland"). Each command carries
+    /// `--event <Event>` because Antigravity stdin lacks hook_event_name. Event
+    /// names are Claude-style PascalCase (PreToolUse/PostToolUse/Stop), and a
+    /// `matcher` is emitted only for the two tool events (#215).
+    case antigravityNamed
+    /// ZCode (Z.ai) Electron desktop app — user-level ~/.zcode/cli/config.json
+    /// wrapping hooks in `{enabled: Bool, events: {EventName: [{hooks:[{type,
+    /// command, timeout?}]}]}}`. Event names use a STRICT 7-name schema
+    /// (SessionStart, UserPromptSubmit, PreToolUse, PermissionRequest,
+    /// PostToolUse, PostToolUseFailure, Stop) — any other key silently drops
+    /// the whole `hooks` config on load. `hooks.enabled` must be explicit; no
+    /// hot-reload, so edits require a ZCode restart (#245). PermissionRequest
+    /// is a blocking approval hook: its stdout decision resolves ZCode's
+    /// permission dialog (#258).
+    case zcode
 
     var storageValue: String {
         switch self {
         case .claude: return "claude"
         case .nested: return "nested"
         case .flat: return "flat"
+        case .traeIDE: return "traeIDE"
         case .traecli: return "traecli"
         case .copilot: return "copilot"
         case .kimi: return "kimi"
         case .kiroAgent: return "kiroAgent"
         case .none: return "none"
         case .cline: return "cline"
+        case .hermes: return "hermes"
+        case .antigravityNamed: return "antigravityNamed"
+        case .zcode: return "zcode"
         }
     }
 
@@ -57,12 +89,16 @@ enum HookFormat {
         case "claude": self = .claude
         case "nested": self = .nested
         case "flat": self = .flat
+        case "traeide": self = .traeIDE
         case "traecli": self = .traecli
         case "copilot": self = .copilot
         case "kimi": self = .kimi
         case "kiroagent": self = .kiroAgent
         case "none": self = .none
         case "cline": self = .cline
+        case "hermes": self = .hermes
+        case "antigravitynamed": self = .antigravityNamed
+        case "zcode": self = .zcode
         default: return nil
         }
     }
@@ -83,6 +119,8 @@ struct CLIConfig {
     var rootOverride: (@Sendable () -> String)? = nil
     /// Optional override for the user-visible config path (e.g. "$CODEX_HOME/hooks.json").
     var displayPathOverride: (@Sendable () -> String)? = nil
+    /// Optional override for the `--source` value passed to the bridge.
+    var bridgeSourceOverride: String? = nil
 
     var fullPath: String {
         if let override = rootOverride {
@@ -123,12 +161,20 @@ struct ConfigInstaller {
     /// Absolute path for external CLI hooks — avoids tilde expansion issues in IDE environments
     private static let bridgeCommand = codeislandDir + "/codeisland-bridge"
     private static let traecliConfigPath = NSHomeDirectory() + "/.trae/traecli.yaml"
+    private static let hermesConfigPath = NSHomeDirectory() + "/.hermes/config.yaml"
+    private static let zcodeConfigPath = NSHomeDirectory() + "/.zcode/cli/config.json"
     private static let piAgentDir = NSHomeDirectory() + "/.pi/agent"
     private static let piExtensionDir = NSHomeDirectory() + "/.pi/agent/extensions"
     private static let piExtensionPath = NSHomeDirectory() + "/.pi/agent/extensions/codeisland.ts"
     private static let ompAgentDir = NSHomeDirectory() + "/.omp/agent"
     private static let ompExtensionDir = NSHomeDirectory() + "/.omp/agent/extensions"
     private static let ompExtensionPath = NSHomeDirectory() + "/.omp/agent/extensions/codeisland.ts"
+    // OpenClaw (openclaw.ai) — Gateway daemon. We install a local plugin pack
+    // directory and register it in ~/.openclaw/openclaw.json via
+    // plugins.load.paths + plugins.entries.codeisland.enabled.
+    private static let openclawDir = NSHomeDirectory() + "/.openclaw"
+    private static let openclawPluginDir = NSHomeDirectory() + "/.openclaw/codeisland-plugin"
+    private static let openclawConfigPath = NSHomeDirectory() + "/.openclaw/openclaw.json"
 
 
     // Legacy paths for migration cleanup (#32)
@@ -156,13 +202,51 @@ struct ConfigInstaller {
         return raw.isEmpty ? "~/.codex/\(filename)" : "$CODEX_HOME/\(filename)"
     }
 
+    // MARK: - Kimi Code home resolution
+
+    /// Modern Kimi Code CLI data root (`~/.kimi-code`). Prefer this over legacy
+    /// kimi-cli (`~/.kimi`) per https://www.kimi.com/code/docs/kimi-code-cli/guides/migration.html
+    static func kimiCodeHome() -> String { NSHomeDirectory() + "/.kimi-code" }
+
+    /// Legacy kimi-cli data root (`~/.kimi`). Migration leaves this intact.
+    static func kimiLegacyHome() -> String { NSHomeDirectory() + "/.kimi" }
+
+    /// Resolve the Kimi config directory to use for hooks install/status.
+    /// Prefers `~/.kimi-code` when present; falls back to `~/.kimi`; defaults to
+    /// the modern path when neither exists (display / future install target).
+    static func kimiHome(fm: FileManager = .default) -> String {
+        let modern = kimiCodeHome()
+        let legacy = kimiLegacyHome()
+        if fm.fileExists(atPath: modern) { return modern }
+        if fm.fileExists(atPath: legacy) { return legacy }
+        return modern
+    }
+
+    /// Whether any Kimi Code / kimi-cli install footprint is on this machine.
+    static func kimiPresenceDetected(fm: FileManager = .default) -> Bool {
+        let modern = kimiCodeHome()
+        let legacy = kimiLegacyHome()
+        return fm.fileExists(atPath: modern)
+            || fm.fileExists(atPath: legacy)
+            || fm.isExecutableFile(atPath: modern + "/bin/kimi")
+            || fm.fileExists(atPath: modern + "/config.toml")
+            || fm.fileExists(atPath: legacy + "/config.toml")
+    }
+
+    static func displayKimiConfigPath(fm: FileManager = .default) -> String {
+        let home = kimiHome(fm: fm)
+        if home.hasSuffix("/.kimi-code") { return "~/.kimi-code/config.toml" }
+        if home.hasSuffix("/.kimi") { return "~/.kimi/config.toml" }
+        return "~/.kimi-code/config.toml"
+    }
+
     // MARK: - All supported CLIs
 
     private static let builtInCLIs: [CLIConfig] = [
         // Claude Code — uses hook script (with bridge dispatcher + nc fallback)
         CLIConfig(
             name: "Claude Code", source: "claude",
-            configPath: ".claude/settings.json", configKey: "hooks",
+            configPath: "settings.json", configKey: "hooks",
             format: .claude,
             events: [
                 ("UserPromptSubmit", 5, true),
@@ -180,7 +264,9 @@ struct ConfigInstaller {
             ],
             versionedEvents: [
                 "PostToolUseFailure": "2.1.89",
-            ]
+            ],
+            rootOverride: { ClaudeConfigPaths.configDir() },
+            displayPathOverride: { ClaudeConfigPaths.displayPath(ClaudeConfigPaths.settingsPath()) }
         ),
         // Codex — honors $CODEX_HOME (falls back to ~/.codex)
         CLIConfig(
@@ -189,9 +275,6 @@ struct ConfigInstaller {
             format: .nested,
             events: [
                 ("SessionStart", 5, false),
-                // Codex clamps SessionEnd hooks to a 3s ceiling and prints a
-                // "clamping SessionEnd hook timeout to 3s" warning for anything
-                // higher — write 3 up front so the config installs cleanly.
                 ("SessionEnd", 3, true),
                 ("UserPromptSubmit", 5, false),
                 ("PreToolUse", 5, false),
@@ -214,7 +297,7 @@ struct ConfigInstaller {
             events: [
                 ("SessionStart", 10000, false),
                 ("SessionEnd", 10000, false),
-                ("BeforeTool", 10000, false),
+                ("BeforeTool", 86400000, false),
                 ("AfterTool", 10000, false),
                 ("BeforeAgent", 10000, false),
                 ("AfterAgent", 10000, false),
@@ -242,15 +325,15 @@ struct ConfigInstaller {
         CLIConfig(
             name: "Trae", source: "trae",
             configPath: ".trae/hooks.json", configKey: "hooks",
-            format: .flat,
-            events: defaultEvents(for: .flat)
+            format: .traeIDE,
+            events: defaultEvents(for: .traeIDE)
         ),
         // Trae CN
         CLIConfig(
             name: "Trae CN", source: "traecn",
             configPath: ".trae-cn/hooks.json", configKey: "hooks",
-            format: .flat,
-            events: defaultEvents(for: .flat)
+            format: .traeIDE,
+            events: defaultEvents(for: .traeIDE)
         ),
         // TraeCli
         CLIConfig(
@@ -259,12 +342,56 @@ struct ConfigInstaller {
             format: .traecli,
             events: defaultEvents(for: .traecli)
         ),
-        // Qoder — Claude Code fork
+        // Trae CLI Next — hooks.json moved under ~/.trae/cli and uses TraeX event names.
+        CLIConfig(
+            name: "Trae CLI Next", source: "traecli-next",
+            configPath: ".trae/cli/hooks.json", configKey: "hooks",
+            format: .nested,
+            events: traecliNextEvents(),
+            bridgeSourceOverride: "traecli"
+        ),
+        // Qoder — Claude Code fork with its own documented PermissionRequest hook.
         CLIConfig(
             name: "Qoder", source: "qoder",
             configPath: ".qoder/settings.json", configKey: "hooks",
             format: .claude,
-            events: defaultEvents(for: .claude)
+            events: [
+                ("UserPromptSubmit", 5, true),
+                ("PreToolUse", 5, false),
+                ("PostToolUse", 5, true),
+                ("PostToolUseFailure", 5, true),
+                ("PermissionRequest", 86400, false),
+                ("Stop", 5, true),
+                ("SubagentStart", 5, true),
+                ("SubagentStop", 5, true),
+                ("SessionStart", 5, false),
+                ("SessionEnd", 5, true),
+                ("Notification", 86400, false),
+                ("PreCompact", 5, true),
+            ]
+        ),
+        // QoderWork — Qoder's standalone desktop assistant app (not the IDE).
+        // Claude-format hooks, but user-level ~/.qoderwork/settings.json ONLY
+        // (no project-level config) and no hot reload: the user must restart
+        // QoderWork after install/uninstall for hook changes to apply (#249).
+        CLIConfig(
+            name: "QoderWork", source: "qoderwork",
+            configPath: ".qoderwork/settings.json", configKey: "hooks",
+            format: .claude,
+            events: [
+                ("UserPromptSubmit", 5, true),
+                ("PreToolUse", 5, false),
+                ("PostToolUse", 5, true),
+                ("PostToolUseFailure", 5, true),
+                ("PermissionRequest", 86400, false),
+                ("Stop", 5, true),
+                ("SubagentStart", 5, true),
+                ("SubagentStop", 5, true),
+                ("SessionStart", 5, false),
+                ("SessionEnd", 5, true),
+                ("Notification", 86400, false),
+                ("PreCompact", 5, true),
+            ]
         ),
         // Factory — Claude Code fork (uses "droid" as source identifier)
         CLIConfig(
@@ -301,6 +428,18 @@ struct ConfigInstaller {
             format: .claude,
             events: defaultEvents(for: .claude)
         ),
+        // Google Antigravity (Gemini-based IDE/CLI) — NOT the Claude-fork above.
+        // Reads a STANDALONE ~/.gemini/config/hooks.json (NOT Gemini-CLI's
+        // settings.json "hooks" key) wrapped in a named-config object keyed by
+        // "codeisland". Event names are Claude-style PascalCase; stdin carries no
+        // hook_event_name, so each command needs --event <Event> (#215).
+        CLIConfig(
+            name: "Google Antigravity", source: "google-antigravity",
+            configPath: ".gemini/config/hooks.json", configKey: "codeisland",
+            format: .antigravityNamed,
+            events: defaultEvents(for: .antigravityNamed),
+            rootOverride: { NSHomeDirectory() }
+        ),
         // WorkBuddy — Claude Code fork
         CLIConfig(
             name: "WorkBuddy", source: "workbuddy",
@@ -308,12 +447,15 @@ struct ConfigInstaller {
             format: .claude,
             events: defaultEvents(for: .claude)
         ),
-        // Hermes — Claude Code fork
+        // Hermes (Nous Research) — NOT a Claude Code fork. Reads shell hooks from
+        // ~/.hermes/config.yaml under a `hooks:` map keyed by snake_case event
+        // names. Writing settings.json (the old behavior) meant Hermes never even
+        // parsed the file, so events never fired (#226).
         CLIConfig(
             name: "Hermes", source: "hermes",
-            configPath: ".hermes/settings.json", configKey: "hooks",
-            format: .claude,
-            events: defaultEvents(for: .claude)
+            configPath: ".hermes/config.yaml", configKey: "hooks",
+            format: .hermes,
+            events: defaultEvents(for: .hermes)
         ),
         // Qwen Code — timeout in milliseconds
         CLIConfig(
@@ -349,12 +491,15 @@ struct ConfigInstaller {
                 ("errorOccurred", 5, true),
             ]
         ),
-        // Kimi Code CLI — TOML hooks in ~/.kimi/config.toml
+        // Kimi Code CLI — TOML hooks in ~/.kimi-code/config.toml (legacy: ~/.kimi).
+        // See https://www.kimi.com/code/docs/kimi-code-cli/customization/hooks.html
         CLIConfig(
             name: "Kimi Code CLI", source: "kimi",
-            configPath: ".kimi/config.toml", configKey: "hooks",
+            configPath: "config.toml", configKey: "hooks",
             format: .kimi,
-            events: defaultEvents(for: .kimi)
+            events: defaultEvents(for: .kimi),
+            rootOverride: { ConfigInstaller.kimiHome() },
+            displayPathOverride: { ConfigInstaller.displayKimiConfigPath() }
         ),
         // Kiro CLI — agent-scoped JSON at ~/.kiro/agents/codeisland.json.
         // User must launch with `kiro --agent codeisland` for hooks to fire (#127).
@@ -381,16 +526,14 @@ struct ConfigInstaller {
                 ("PreCompact",       5, true),
             ]
         ),
-        // pi — TypeScript extension auto-discovered from ~/.pi/agent/extensions.
+        // Pi — TypeScript extension auto-discovered from ~/.pi/agent/extensions.
         CLIConfig(
-            name: "pi",
+            name: "Pi",
             source: "pi",
-            configPath: ".pi/agent/extensions/codeisland.ts",
-            configKey: "",
+            configPath: ".pi/agent/extensions/codeisland.ts", configKey: "",
             format: .none,
             events: []
-        )
-        ,
+        ),
         // Oh My Pi / OMP — TypeScript extension loaded from ~/.omp/agent/extensions.
         CLIConfig(
             name: "Oh My Pi",
@@ -399,6 +542,27 @@ struct ConfigInstaller {
             configKey: "",
             format: .none,
             events: []
+        ),
+        // OpenClaw — personal-assistant Gateway daemon (openclaw.ai). No shell
+        // hooks: a TypeScript plugin pack is written to ~/.openclaw/codeisland-plugin
+        // and registered in ~/.openclaw/openclaw.json. The user must restart the
+        // Gateway afterwards for the plugin to load.
+        CLIConfig(
+            name: "OpenClaw",
+            source: "openclaw",
+            configPath: ".openclaw/codeisland-plugin/index.ts",
+            configKey: "",
+            format: .none,
+            events: []
+        ),
+        // ZCode (Z.ai) — Electron desktop app, NOT a Claude Code fork. Reads
+        // hooks from ~/.zcode/cli/config.json (strict event whitelist, no
+        // hot-reload — see `.zcode` HookFormat doc for details) (#245).
+        CLIConfig(
+            name: "ZCode", source: "zcode",
+            configPath: ".zcode/cli/config.json", configKey: "hooks",
+            format: .zcode,
+            events: defaultEvents(for: .zcode)
         )
     ]
 
@@ -435,7 +599,7 @@ struct ConfigInstaller {
                 ("PostToolUse", 5, false),
                 ("Stop", 5, false),
             ]
-        case .flat:
+        case .flat, .traeIDE:
             return [
                 ("beforeSubmitPrompt", 5, false),
                 ("beforeShellExecution", 5, false),
@@ -498,11 +662,73 @@ struct ConfigInstaller {
                 ("postToolUse", 5, true),
                 ("stop", 5, true),
             ]
+        case .hermes:
+            // Hermes event names (snake_case). Timeouts in seconds (Hermes default
+            // 60, max 300). Keep status events lightweight; do NOT register a
+            // long-timeout blocking permission event — Hermes uses
+            // pre_approval_request/post_approval_response, not a Claude-style
+            // PermissionRequest, so permission/question handling is left out of
+            // v1 (#226).
+            return [
+                ("pre_tool_call", 5, false),
+                ("post_tool_call", 5, false),
+                ("on_session_start", 5, false),
+                ("on_session_end", 5, false),
+                ("subagent_stop", 5, false),
+            ]
         case .cline:
             return []
         case .none:
             return []
+        case .antigravityNamed:
+            // Antigravity hooks.json uses Claude-style PascalCase event names.
+            // We install the three actionable events for status/permission.
+            // PreInvocation/PostInvocation are pass-through with no internal
+            // meaning, so they're omitted. Timeout is in SECONDS (docs default 30).
+            return [
+                ("PreToolUse", 86400, false),
+                ("PostToolUse", 5, false),
+                ("Stop", 5, false),
+            ]
+        case .zcode:
+            // All 7 events of ZCode's strict schema, including PermissionRequest.
+            // Its decision contract was confirmed against the shipped agent
+            // kernel (ZCode.app/Contents/Resources/glm/zcode.cjs, #258):
+            // stdout `{hookSpecificOutput: {hookEventName: "PermissionRequest",
+            // decision: {behavior: "allow"|"deny", permissionUpdates?}}}`
+            // resolves the approval; empty stdout, timeout, or schema failure
+            // all fall back to ZCode's own permission dialog. Timeouts are in
+            // seconds; only values above ZCode's 60s per-hook default are
+            // written into config.json (see mergeZcodeHooks) so a pending
+            // approval can wait on the island for as long as Claude's does.
+            return [
+                ("SessionStart", 5, false),
+                ("UserPromptSubmit", 5, true),
+                ("PreToolUse", 5, false),
+                ("PermissionRequest", 86400, false),
+                ("PostToolUse", 5, true),
+                ("PostToolUseFailure", 5, true),
+                ("Stop", 5, true),
+            ]
         }
+    }
+
+    private static func traecliNextEvents() -> [(String, Int, Bool)] {
+        [
+            ("SessionStart", 5, false),
+            ("SessionEnd", 5, true),
+            ("UserPromptSubmit", 5, true),
+            ("PreToolUse", 5, false),
+            ("PostToolUse", 5, true),
+            ("PostToolUseFailure", 5, true),
+            ("PermissionRequest", 86400, false),
+            ("Notification", 86400, false),
+            ("SubagentStart", 5, true),
+            ("SubagentStop", 5, true),
+            ("Stop", 5, true),
+            ("PreCompact", 5, true),
+            ("PostCompact", 5, true),
+        ]
     }
 
     static func customCLIConfigs() -> [CustomCLIConfig] {
@@ -634,6 +860,10 @@ struct ConfigInstaller {
         try? fm.removeItem(atPath: legacyBridgePath)
         try? fm.removeItem(atPath: legacyHookScriptPath)
 
+        // A previous run may have created the Claude config dir after the resolution was
+        // memoized, so re-resolve before installing into it.
+        ClaudeConfigPaths.invalidateCache()
+
         // Install hook script + bridge binary (shared by all CLIs)
         installHookScript(fm: fm)
         installBridgeBinary(fm: fm)
@@ -646,7 +876,11 @@ struct ConfigInstaller {
                 if !installClaudeHooks(cli: cli, fm: fm) { ok = false }
             } else if cli.source == "traecli" {
                 if !installTraecliHooks(fm: fm) { ok = false }
-            } else if cli.source == "pi" || cli.source == "omp" {
+            } else if cli.format == .hermes {
+                if !installHermesHooks(fm: fm) { ok = false }
+            } else if cli.format == .zcode {
+                if !installZcodeHooks(fm: fm) { ok = false }
+            } else if cli.source == "pi" || cli.source == "omp" || cli.source == "openclaw" {
                 continue
             } else {
                 if !installExternalHooks(cli: cli, fm: fm) { ok = false }
@@ -685,6 +919,11 @@ struct ConfigInstaller {
             if !installOmpExtension(fm: fm) { ok = false }
         }
 
+        // Install OpenClaw plugin
+        if isEnabled(source: "openclaw") {
+            if !installOpenclawPlugin(fm: fm) { ok = false }
+        }
+
         return ok
     }
 
@@ -699,10 +938,16 @@ struct ConfigInstaller {
         for cli in allCLIs {
             if cli.source == "traecli" {
                 uninstallTraecliHooks(fm: fm)
+            } else if cli.format == .hermes {
+                uninstallHermesHooks(fm: fm)
+            } else if cli.format == .zcode {
+                uninstallZcodeHooks(fm: fm)
             } else if cli.source == "pi" {
                 uninstallPiExtension(fm: fm)
             } else if cli.source == "omp" {
                 uninstallOmpExtension(fm: fm)
+            } else if cli.source == "openclaw" {
+                uninstallOpenclawPlugin(fm: fm)
             } else {
                 uninstallHooks(cli: cli, fm: fm)
             }
@@ -725,7 +970,10 @@ struct ConfigInstaller {
         if source == "opencode" { return isOpencodePluginInstalled(fm: FileManager.default) }
         if source == "pi" { return isPiExtensionInstalled(fm: FileManager.default) }
         if source == "omp" { return isOmpExtensionInstalled(fm: FileManager.default) }
+        if source == "openclaw" { return isOpenclawPluginInstalled(fm: FileManager.default) }
         if source == "traecli" { return isTraecliHooksInstalled(fm: FileManager.default) }
+        if source == "hermes" { return isHermesHooksInstalled(fm: FileManager.default) }
+        if source == "zcode" { return isZcodeHooksInstalled(fm: FileManager.default) }
         if source == "cline" {
             guard let cli = allCLIs.first(where: { $0.source == "cline" }) else { return false }
             return isClineHooksInstalled(cli: cli, fm: FileManager.default)
@@ -739,12 +987,25 @@ struct ConfigInstaller {
         if source == "opencode" { return FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.config/opencode") }
         if source == "pi" { return FileManager.default.fileExists(atPath: piAgentDir) }
         if source == "omp" { return FileManager.default.fileExists(atPath: ompAgentDir) }
+        if source == "openclaw" { return FileManager.default.fileExists(atPath: openclawDir) }
         if source == "copilot" { return FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.copilot") }
         if source == "cline" {
             let fm = FileManager.default
             return fm.fileExists(atPath: NSHomeDirectory() + "/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev")
                 || fm.fileExists(atPath: NSHomeDirectory() + "/Documents/Cline")
         }
+        if source == "google-antigravity" {
+            // Detect via Antigravity-specific markers, NOT bare ~/.gemini (which the
+            // plain Gemini CLI also creates). See installExternalHooks gating (#215).
+            let fm = FileManager.default
+            return fm.fileExists(atPath: NSHomeDirectory() + "/.gemini/config")
+                || fm.fileExists(atPath: NSHomeDirectory() + "/.gemini/antigravity-cli")
+        }
+        // ZCode's config lives one level below the app's real root (~/.zcode/cli/),
+        // so detect against the root itself rather than cli.dirPath (#245).
+        if source == "zcode" { return FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.zcode") }
+        // Kimi Code CLI moved from ~/.kimi (kimi-cli) to ~/.kimi-code.
+        if source == "kimi" { return kimiPresenceDetected() }
         guard let cli = allCLIs.first(where: { $0.source == source }) else { return false }
         return FileManager.default.fileExists(atPath: cli.dirPath)
     }
@@ -783,6 +1044,10 @@ struct ConfigInstaller {
                 return installed
             } else if cli.source == "traecli" {
                 return installTraecliHooks(fm: fm)
+            } else if cli.format == .hermes {
+                return installHermesHooks(fm: fm)
+            } else if cli.format == .zcode {
+                return installZcodeHooks(fm: fm)
             } else {
                 installExternalHooks(cli: cli, fm: fm)
                 if cli.source == "codex" { enableCodexHooksConfig(fm: fm) }
@@ -801,6 +1066,10 @@ struct ConfigInstaller {
             } else if let cli = allCLIs.first(where: { $0.source == source }) {
                 if cli.source == "traecli" {
                     uninstallTraecliHooks(fm: fm)
+                } else if cli.format == .hermes {
+                    uninstallHermesHooks(fm: fm)
+                } else if cli.format == .zcode {
+                    uninstallZcodeHooks(fm: fm)
                 } else {
                     uninstallHooks(cli: cli, fm: fm)
                 }
@@ -829,6 +1098,9 @@ struct ConfigInstaller {
                 dirExists = fm.fileExists(atPath: piAgentDir)
             } else if cli.source == "omp" {
                 dirExists = fm.fileExists(atPath: ompAgentDir)
+            } else if cli.format == .zcode {
+                // Config lives one level below the app's real root (#245).
+                dirExists = fm.fileExists(atPath: NSHomeDirectory() + "/.zcode")
             } else {
                 dirExists = fm.fileExists(atPath: cli.dirPath)
             }
@@ -840,6 +1112,20 @@ struct ConfigInstaller {
             if cli.source == "traecli" {
                 if isTraecliHooksInstalled(fm: fm) { continue }
                 if installTraecliHooks(fm: fm) {
+                    repaired.append(cli.name)
+                }
+                continue
+            }
+            if cli.format == .hermes {
+                if isHermesHooksInstalled(fm: fm) { continue }
+                if installHermesHooks(fm: fm) {
+                    repaired.append(cli.name)
+                }
+                continue
+            }
+            if cli.format == .zcode {
+                if isZcodeHooksInstalled(fm: fm) { continue }
+                if installZcodeHooks(fm: fm) {
                     repaired.append(cli.name)
                 }
                 continue
@@ -1222,17 +1508,12 @@ struct ConfigInstaller {
     static func installExternalHooks(cli: CLIConfig, fm: FileManager) -> Bool {
         if cli.format == .cline { return installClineHooks(cli: cli, fm: fm) }
         if cli.format == .kimi {
-            // Kimi: do not create ~/.kimi or config files unless there is already
-            // evidence of an existing Kimi installation/configuration.
-            let rootDir = NSHomeDirectory() + "/.kimi"
-            let sessionsDir = rootDir + "/sessions"
-            let hasKimiPresence =
-                fm.fileExists(atPath: cli.dirPath) ||
-                fm.fileExists(atPath: rootDir) ||
-                fm.fileExists(atPath: sessionsDir)
-            guard hasKimiPresence else { return true }
-            if !fm.fileExists(atPath: cli.dirPath) {
-                try? fm.createDirectory(atPath: cli.dirPath, withIntermediateDirectories: true)
+            // Kimi: do not create ~/.kimi-code (or legacy ~/.kimi) unless there is
+            // already evidence of an existing install. Prefer the modern root.
+            guard kimiPresenceDetected(fm: fm) else { return true }
+            let rootDir = kimiHome(fm: fm)
+            if !fm.fileExists(atPath: rootDir) {
+                try? fm.createDirectory(atPath: rootDir, withIntermediateDirectories: true)
             }
             return installKimiHooks(cli: cli, fm: fm)
         }
@@ -1251,6 +1532,22 @@ struct ConfigInstaller {
             if !fm.fileExists(atPath: cli.dirPath) {
                 try? fm.createDirectory(atPath: cli.dirPath, withIntermediateDirectories: true)
             }
+        } else if cli.format == .antigravityNamed {
+            // Google Antigravity shares the ~/.gemini root with the plain Gemini
+            // CLI, so we must NOT install just because ~/.gemini exists — that
+            // would write a stray hooks.json into a Gemini-only user's home.
+            // Gate on an Antigravity-specific marker: the shared ~/.gemini/config
+            // dir (where agy-cli writes per CHANGELOG v1.0.8) or the legacy
+            // ~/.gemini/antigravity-cli dir.
+            let geminiRoot = NSHomeDirectory() + "/.gemini"
+            let configDir = cli.dirPath                       // ~/.gemini/config
+            let antigravityDir = geminiRoot + "/antigravity-cli"
+            let hasAntigravityPresence =
+                fm.fileExists(atPath: configDir) || fm.fileExists(atPath: antigravityDir)
+            guard hasAntigravityPresence else { return true }
+            if !fm.fileExists(atPath: configDir) {
+                try? fm.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+            }
         } else {
             guard fm.fileExists(atPath: cli.dirPath) else { return true } // CLI not installed, skip OK
         }
@@ -1264,9 +1561,15 @@ struct ConfigInstaller {
 
         let root = parseJSONFile(at: cli.fullPath, fm: fm) ?? [:]
         var hooks = root[cli.configKey] as? [String: Any] ?? [:]
+        if cli.source == "traecli-next" {
+            // Clean up CodeIsland-managed entries written with the old Trae IDE
+            // event names (for example beforeReadFile) at the new Trae CLI path.
+            hooks = removeManagedHookEntries(from: hooks)
+        }
         // Quote the path in case home directory contains spaces or special characters
         let quotedBridge = bridgeCommand.contains(" ") ? "\"\(bridgeCommand)\"" : bridgeCommand
-        let baseCommand = "\(quotedBridge) --source \(cli.source)"
+        let bridgeSource = cli.bridgeSourceOverride ?? cli.source
+        let baseCommand = "\(quotedBridge) --source \(bridgeSource)"
 
         for (event, timeout, _) in cli.events {
             var eventEntries = hooks[event] as? [[String: Any]] ?? []
@@ -1280,9 +1583,19 @@ struct ConfigInstaller {
                 // — otherwise long-running PermissionRequest hooks hang the agent (#103).
                 entry = ["matcher": "*", "hooks": [["type": "command", "command": baseCommand, "timeout": timeout] as [String: Any]]]
             case .nested:
-                entry = ["hooks": [["type": "command", "command": baseCommand, "timeout": timeout] as [String: Any]]]
+                let cmd = (cli.source == "gemini" || cli.source == "traecli-next")
+                    ? "\(baseCommand) --event \(event)"
+                    : baseCommand
+                entry = ["hooks": [["type": "command", "command": cmd, "timeout": timeout] as [String: Any]]]
             case .flat:
                 entry = ["command": "\(baseCommand) --event \(event)"]
+            case .traeIDE:
+                let traeCommand = "\(baseCommand) --event \(event)"
+                entry = [
+                    "matcher": "*",
+                    "loop_limit": 5,
+                    "hooks": [["type": "command", "command": traeCommand, "timeout": timeout] as [String: Any]],
+                ]
             case .traecli:
                 // Treat like flat for custom JSON hook configs; built-in TraeCli uses YAML install path.
                 entry = ["command": "\(baseCommand) --event \(event)"]
@@ -1293,10 +1606,32 @@ struct ConfigInstaller {
             case .kimi:
                 // Handled earlier in the function; should never reach here
                 return false
+            case .hermes:
+                // Hermes uses a dedicated YAML installer (installHermesHooks);
+                // never reaches the JSON external-hook path.
+                return false
+            case .zcode:
+                // ZCode uses a dedicated installer (installZcodeHooks) for its
+                // {enabled, events} wrapper; never reaches this generic path.
+                return false
             case .kiroAgent:
                 // Kiro entries: { command, matcher: "*", timeout_ms }. Caller declares
                 // timeout in seconds for consistency with other CLIs; convert to ms here.
                 entry = ["command": baseCommand, "matcher": "*", "timeout_ms": timeout * 1000]
+            case .antigravityNamed:
+                // Antigravity named-config entry. The outer wrapper name is the
+                // configKey ("codeisland"), keyed here by installExternalHooks, so we
+                // emit only the inner {matcher?, hooks:[{type,command,timeout}]} value.
+                // stdin lacks hook_event_name -> the command must carry --event.
+                // `matcher` is meaningful ONLY for PreToolUse/PostToolUse (regex over
+                // the tool name, "*" = all); it's ignored for Stop, so we omit it there.
+                let agyCommand = "\(baseCommand) --event \(event)"
+                let hookList: [[String: Any]] = [["type": "command", "command": agyCommand, "timeout": timeout]]
+                if event == "PreToolUse" || event == "PostToolUse" {
+                    entry = ["matcher": "*", "hooks": hookList]
+                } else {
+                    entry = ["hooks": hookList]
+                }
             case .cline, .none:
                 // Handled at the top of installExternalHooks; never reaches here
                 return false
@@ -1308,11 +1643,11 @@ struct ConfigInstaller {
         // Seed file if missing — ensure Copilot's required "version" key lands first so the key-order
         // for downstream readers stays stable across installs.
         var seeded = originalText
-        if cli.format == .copilot, (originalText == nil || originalText?.isEmpty == true) {
+        if (cli.format == .copilot || cli.format == .traeIDE), (originalText == nil || originalText?.isEmpty == true) {
             seeded = "{\n  \"version\": 1\n}\n"
-        } else if cli.format == .copilot, root["version"] == nil {
+        } else if (cli.format == .copilot || cli.format == .traeIDE), root["version"] == nil {
             // Only insert `version` when the user hasn't set one themselves — don't clobber a
-            // user-bumped schema version in case Copilot ships v2+ in the future.
+            // user-bumped schema version in case Copilot/Trae ships v2+ in the future.
             if let t = originalText, let withVer = JSONMinimalEditor.setTopLevelValue(in: t, key: "version", value: 1) {
                 seeded = withVer
             }
@@ -1851,6 +2186,318 @@ struct ConfigInstaller {
         return removeManagedTraecliHooks(from: normalized, source: "traecli") != normalized
     }
 
+    // MARK: - Hermes config.yaml (#226)
+    //
+    // Hermes (Nous Research) is NOT a Claude Code fork. It reads shell hooks from
+    // ~/.hermes/config.yaml under a `hooks:` MAP whose keys are snake_case event
+    // names and whose values are lists of { matcher?, command, timeout? }. This is
+    // a different shape than TraeCli (a flat list with `type: command` +
+    // `matchers`), so it gets its own Yams-based merge/remove path.
+
+    /// The bridge command we inject for Hermes hooks (path quoted if it has spaces).
+    private static func hermesInjectedCommand() -> String {
+        let quotedBridge = bridgeCommand.contains(" ") ? "\"\(bridgeCommand)\"" : bridgeCommand
+        return "\(quotedBridge) --source hermes"
+    }
+
+    /// Command-identity check that tolerates tilde vs. absolute path and quoting,
+    /// mirroring `isOurTraecliInjectedCommand` but for the Hermes source.
+    private static func isOurHermesInjectedCommand(_ command: String) -> Bool {
+        let normalized = normalizeTraecliCommandForCompare(command)
+        for candidate in expectedTraecliCommandCandidates(source: "hermes") {
+            if normalized == normalizeTraecliCommandForCompare(candidate) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Build the `hooks:` map (event -> [ {command, timeout} ]) merged into any
+    /// existing Hermes hooks map, dropping prior managed entries first.
+    static func mergeHermesHooks(into contents: String) -> String {
+        let normalized = contents.replacingOccurrences(of: "\r\n", with: "\n")
+        let command = hermesInjectedCommand()
+
+        var root: [String: Any] = [:]
+        if !normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if let loaded = try? Yams.load(yaml: normalized),
+               let dict = asStringKeyedDict(loaded) {
+                root = dict
+            } else {
+                // Never clobber an unparseable user file.
+                return contents.hasSuffix("\n") ? contents : (contents + "\n")
+            }
+        }
+
+        var hooks: [String: Any] = asStringKeyedDict(root["hooks"] ?? [:]) ?? [:]
+
+        for (event, timeout, _) in defaultEvents(for: .hermes) {
+            var entries: [Any] = (hooks[event] as? [Any]) ?? []
+            entries.removeAll { item in
+                guard let entry = asStringKeyedDict(item),
+                      let cmd = entry["command"] as? String else { return false }
+                return isOurHermesInjectedCommand(cmd)
+            }
+            let managed: [String: Any] = ["command": command, "timeout": timeout]
+            entries.insert(managed, at: 0)
+            hooks[event] = entries
+        }
+
+        root["hooks"] = hooks
+
+        guard var dumped = try? Yams.dump(object: root) else {
+            return contents.hasSuffix("\n") ? contents : (contents + "\n")
+        }
+        if !dumped.hasSuffix("\n") { dumped.append("\n") }
+        return dumped
+    }
+
+    /// Remove only our managed entries from the Hermes hooks map; drop now-empty
+    /// event keys and an emptied `hooks:` map so we don't leave noise behind.
+    static func removeManagedHermesHooks(from contents: String) -> String {
+        let normalized = contents.replacingOccurrences(of: "\r\n", with: "\n")
+        if normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return contents }
+
+        guard let loaded = try? Yams.load(yaml: normalized),
+              var root = asStringKeyedDict(loaded),
+              var hooks = asStringKeyedDict(root["hooks"] ?? [:])
+        else { return contents }
+
+        var didRemove = false
+        for (event, value) in hooks {
+            guard let entries = value as? [Any] else { continue }
+            let cleaned = entries.filter { item in
+                guard let entry = asStringKeyedDict(item),
+                      let cmd = entry["command"] as? String else { return true }
+                if isOurHermesInjectedCommand(cmd) {
+                    didRemove = true
+                    return false
+                }
+                return true
+            }
+            if cleaned.isEmpty {
+                hooks.removeValue(forKey: event)
+            } else {
+                hooks[event] = cleaned
+            }
+        }
+
+        guard didRemove else { return contents }
+
+        if hooks.isEmpty {
+            root.removeValue(forKey: "hooks")
+        } else {
+            root["hooks"] = hooks
+        }
+
+        guard var dumped = try? Yams.dump(object: root) else { return contents }
+        if !dumped.hasSuffix("\n") { dumped.append("\n") }
+        return dumped
+    }
+
+    @discardableResult
+    private static func installHermesHooks(fm: FileManager) -> Bool {
+        let configDir = (hermesConfigPath as NSString).deletingLastPathComponent
+        // Only write when Hermes is actually present on this machine.
+        guard fm.fileExists(atPath: configDir) else { return true }
+
+        var original = ""
+        if fm.fileExists(atPath: hermesConfigPath) {
+            guard let data = fm.contents(atPath: hermesConfigPath) else { return false }
+            // Never clobber existing file contents if decoding fails.
+            guard let decoded = String(data: data, encoding: .utf8) else { return false }
+            original = decoded
+        }
+
+        let merged = mergeHermesHooks(into: original)
+        guard let data = merged.data(using: .utf8) else { return false }
+        do {
+            try data.write(to: URL(fileURLWithPath: hermesConfigPath), options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func uninstallHermesHooks(fm: FileManager) {
+        guard fm.fileExists(atPath: hermesConfigPath),
+              let original = try? String(contentsOfFile: hermesConfigPath, encoding: .utf8)
+        else { return }
+
+        let cleaned = removeManagedHermesHooks(from: original)
+        guard cleaned != original, let data = cleaned.data(using: .utf8) else { return }
+        try? data.write(to: URL(fileURLWithPath: hermesConfigPath), options: .atomic)
+    }
+
+    private static func isHermesHooksInstalled(fm: FileManager) -> Bool {
+        guard fm.fileExists(atPath: hermesConfigPath),
+              let contents = try? String(contentsOfFile: hermesConfigPath, encoding: .utf8)
+        else { return false }
+
+        let normalized = contents.replacingOccurrences(of: "\r\n", with: "\n")
+        return removeManagedHermesHooks(from: normalized) != normalized
+    }
+
+    // MARK: - ZCode config.json (#245, #258)
+    //
+    // ZCode (Z.ai) is an Electron desktop app — NOT a Claude Code fork. Hooks
+    // live under `hooks: {enabled, events}`, where `events` maps event names
+    // to Claude/nested-shaped entries ({hooks: [{type, command, timeout?}]}) —
+    // the same shape `containsOurHook` / `removeManagedHookEntries` already
+    // understand, so those generic helpers apply unchanged to the `events`
+    // sub-dict. The event-name schema is STRICT: any key outside
+    // `zcodeAllowedEvents` silently drops the WHOLE `hooks` config on load —
+    // never write outside that whitelist. Hook OUTPUT is equally strict
+    // (Zod .strict() in the kernel): a PermissionRequest decision must be
+    // exactly {behavior, permissionUpdates?/updatedInput?} or
+    // {behavior: "deny", interrupt?, message?} — Claude's
+    // `updatedPermissions`/`destination` keys fail validation and the whole
+    // decision is discarded (ZCode then shows its own dialog). See
+    // AppState.zcodeAlwaysAllowResponse for the always-allow shape. No
+    // hot-reload; a ZCode restart is required after any config.json edit.
+
+    /// The only 7 event names ZCode's schema accepts. Writing anything else
+    /// causes the entire `hooks` config to be silently discarded on load —
+    /// always filter against this before writing an event key.
+    static let zcodeAllowedEvents: Set<String> = [
+        "SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest",
+        "PostToolUse", "PostToolUseFailure", "Stop",
+    ]
+
+    /// The bridge command we inject for ZCode hooks (path quoted if it has spaces).
+    private static func zcodeInjectedCommand() -> String {
+        let quotedBridge = bridgeCommand.contains(" ") ? "\"\(bridgeCommand)\"" : bridgeCommand
+        return "\(quotedBridge) --source zcode"
+    }
+
+    /// Parse a JSON/JSONC string directly (no filesystem access) — the string
+    /// counterpart to `parseJSONFile`, used by the pure merge/remove functions
+    /// below so they're testable without touching the real ~/.zcode path.
+    private static func parseJSONString(_ text: String) -> [String: Any]? {
+        guard let data = stripJSONComments(text).data(using: .utf8) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    /// Build the merged `hooks: {enabled, events}` document from raw file text
+    /// (seeds a fresh `{}` document when `contents` is empty), dropping stale
+    /// managed entries first so re-running is idempotent. Returns `contents`
+    /// unchanged if it fails to parse as a JSON object — never clobber
+    /// unparseable user data (#89).
+    static func mergeZcodeHooks(into contents: String) -> String {
+        let isEmpty = contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let baseText = isEmpty ? "{}\n" : contents
+        guard let root = parseJSONString(baseText) else { return contents }
+
+        var hooksRoot = root["hooks"] as? [String: Any] ?? [:]
+        var events = removeManagedHookEntries(from: hooksRoot["events"] as? [String: Any] ?? [:])
+
+        let command = zcodeInjectedCommand()
+        for (event, timeout, _) in defaultEvents(for: .zcode) where zcodeAllowedEvents.contains(event) {
+            var entries = events[event] as? [[String: Any]] ?? []
+            var hook: [String: Any] = ["type": "command", "command": command]
+            // ZCode's per-hook default timeout is 60s. Status hooks keep that
+            // default (the bridge self-limits far below it); blocking hooks
+            // (PermissionRequest) must override it or ZCode would abandon the
+            // approval after a minute and pop its own dialog. `timeout` is
+            // ZCode-native seconds (its kernel converts to ms internally).
+            if timeout > 60 {
+                hook["timeout"] = timeout
+            }
+            entries.append(["hooks": [hook]])
+            events[event] = entries
+        }
+
+        // `enabled` is the user's master switch over ALL their hooks — never
+        // flip an explicit false (that would silently re-arm every third-party
+        // hook command they turned off). Our hooks stay dormant in that case.
+        if hooksRoot["enabled"] == nil {
+            hooksRoot["enabled"] = true
+        }
+        hooksRoot["events"] = events
+
+        return JSONMinimalEditor.setTopLevelValue(in: baseText, key: "hooks", value: hooksRoot) ?? contents
+    }
+
+    /// Remove only our managed entries from the ZCode `hooks.events` map; drop
+    /// now-empty event keys, and drop the whole `hooks` key if nothing but our
+    /// own `enabled`/`events` scaffolding remains (never leave `{"enabled":
+    /// true, "events": {}}` behind).
+    static func removeManagedZcodeHooks(from contents: String) -> String {
+        guard let root = parseJSONString(contents),
+              var hooksRoot = root["hooks"] as? [String: Any]
+        else { return contents }
+
+        var events = hooksRoot["events"] as? [String: Any] ?? [:]
+        var didRemove = false
+        for (event, value) in events {
+            guard let entries = value as? [[String: Any]] else { continue }
+            let cleaned = entries.filter { !containsOurHook($0) }
+            if cleaned.count != entries.count { didRemove = true }
+            if cleaned.isEmpty {
+                events.removeValue(forKey: event)
+            } else {
+                events[event] = cleaned
+            }
+        }
+        guard didRemove else { return contents }
+        hooksRoot["events"] = events
+
+        // Nothing of ours — or the user's — left under `hooks`: drop the whole
+        // key instead of leaving empty scaffolding behind.
+        let hooksIsFullyOurs = events.isEmpty && hooksRoot.keys.allSatisfy { $0 == "enabled" || $0 == "events" }
+        if hooksIsFullyOurs {
+            return JSONMinimalEditor.deleteTopLevelKey(in: contents, key: "hooks") ?? contents
+        }
+        return JSONMinimalEditor.setTopLevelValue(in: contents, key: "hooks", value: hooksRoot) ?? contents
+    }
+
+    @discardableResult
+    private static func installZcodeHooks(fm: FileManager) -> Bool {
+        let zcodeRoot = NSHomeDirectory() + "/.zcode"
+        // Only write when ZCode is actually present on this machine.
+        guard fm.fileExists(atPath: zcodeRoot) else { return true }
+        let configDir = (zcodeConfigPath as NSString).deletingLastPathComponent
+        if !fm.fileExists(atPath: configDir) {
+            try? fm.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+        }
+
+        var original = ""
+        if fm.fileExists(atPath: zcodeConfigPath) {
+            guard let data = fm.contents(atPath: zcodeConfigPath),
+                  let decoded = String(data: data, encoding: .utf8) else { return false }
+            original = decoded
+        }
+        // Refuse to touch unparseable files (#89 safety guard).
+        if !original.isEmpty, parseJSONString(original) == nil { return false }
+
+        let merged = mergeZcodeHooks(into: original)
+        guard let data = merged.data(using: .utf8) else { return false }
+        do {
+            try data.write(to: URL(fileURLWithPath: zcodeConfigPath), options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func uninstallZcodeHooks(fm: FileManager) {
+        guard fm.fileExists(atPath: zcodeConfigPath),
+              let original = try? String(contentsOfFile: zcodeConfigPath, encoding: .utf8)
+        else { return }
+
+        let cleaned = removeManagedZcodeHooks(from: original)
+        guard cleaned != original, let data = cleaned.data(using: .utf8) else { return }
+        try? data.write(to: URL(fileURLWithPath: zcodeConfigPath), options: .atomic)
+    }
+
+    private static func isZcodeHooksInstalled(fm: FileManager) -> Bool {
+        guard fm.fileExists(atPath: zcodeConfigPath),
+              let contents = try? String(contentsOfFile: zcodeConfigPath, encoding: .utf8)
+        else { return false }
+
+        return removeManagedZcodeHooks(from: contents) != contents
+    }
+
     // MARK: - Codex config.toml
 
     /// Ensure hooks = true under [features] in $CODEX_HOME/config.toml
@@ -2001,12 +2648,18 @@ struct ConfigInstaller {
     }
 
     private static func isKimiHooksInstalled(cli: CLIConfig, fm: FileManager) -> Bool {
-        guard fm.fileExists(atPath: cli.fullPath),
-              let data = fm.contents(atPath: cli.fullPath),
-              let contents = String(data: data, encoding: .utf8) else { return false }
-
-        return cli.events.allSatisfy { (event, _, _) in
-            contentsContainsKimiHook(contents, event: event)
+        // Prefer modern home, but also treat legacy ~/.kimi as installed if our
+        // hooks are still there (migration leaves the old tree intact).
+        var candidates = [kimiCodeHome() + "/config.toml", kimiLegacyHome() + "/config.toml"]
+        let resolved = cli.fullPath
+        if !candidates.contains(resolved) { candidates.append(resolved) }
+        return candidates.contains { path in
+            guard fm.fileExists(atPath: path),
+                  let data = fm.contents(atPath: path),
+                  let contents = String(data: data, encoding: .utf8) else { return false }
+            return cli.events.allSatisfy { (event, _, _) in
+                contentsContainsKimiHook(contents, event: event)
+            }
         }
     }
 
@@ -2049,31 +2702,38 @@ struct ConfigInstaller {
             return
         }
         if cli.format == .kimi {
-            guard fm.fileExists(atPath: cli.fullPath),
-                  let data = fm.contents(atPath: cli.fullPath),
-                  var contents = String(data: data, encoding: .utf8) else { return }
-            contents = removeKimiHooks(from: contents)
+            // Scrub modern + legacy homes; also honor absolute cli.fullPath
+            // (hermetic tests / custom roots).
+            var paths = [kimiCodeHome() + "/config.toml", kimiLegacyHome() + "/config.toml"]
+            let resolved = cli.fullPath
+            if !paths.contains(resolved) { paths.append(resolved) }
+            for path in paths {
+                guard fm.fileExists(atPath: path),
+                      let data = fm.contents(atPath: path),
+                      var contents = String(data: data, encoding: .utf8) else { continue }
+                contents = removeKimiHooks(from: contents)
 
-            // Restore commented-out legacy scalar hooks
-            let lines = contents.components(separatedBy: "\n")
-            var restored: [String] = []
-            for line in lines {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed == "# [CodeIsland] commented out legacy scalar hooks to avoid TOML conflict" {
-                    continue
+                // Restore commented-out legacy scalar hooks
+                let lines = contents.components(separatedBy: "\n")
+                var restored: [String] = []
+                for line in lines {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    if trimmed == "# [CodeIsland] commented out legacy scalar hooks to avoid TOML conflict" {
+                        continue
+                    }
+                    if trimmed.range(of: #"^#\s*hooks\s*="#, options: .regularExpression) != nil {
+                        restored.append(line.replacingOccurrences(of: #"^#\s*"#, with: "", options: .regularExpression))
+                    } else {
+                        restored.append(line)
+                    }
                 }
-                if trimmed.range(of: #"^#\s*hooks\s*="#, options: .regularExpression) != nil {
-                    restored.append(line.replacingOccurrences(of: #"^#\s*"#, with: "", options: .regularExpression))
-                } else {
-                    restored.append(line)
+                while let last = restored.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
+                    restored.removeLast()
                 }
-            }
-            while let last = restored.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
-                restored.removeLast()
-            }
-            contents = restored.joined(separator: "\n")
+                contents = restored.joined(separator: "\n")
 
-            fm.createFile(atPath: cli.fullPath, contents: contents.data(using: .utf8))
+                fm.createFile(atPath: path, contents: contents.data(using: .utf8))
+            }
             return
         }
 
@@ -2305,7 +2965,7 @@ struct ConfigInstaller {
     // MARK: - pi Extension
 
     /// Current pi extension version — bump when codeisland-pi.ts changes.
-    private static let piExtensionVersion = "v1"
+    private static let piExtensionVersion = "v2"
 
     private static func piExtensionSource() -> String? {
         if let url = Bundle.appModule.url(forResource: "codeisland-pi", withExtension: "ts", subdirectory: "Resources"),
@@ -2387,6 +3047,134 @@ struct ConfigInstaller {
         fm: FileManager
     ) -> Bool {
         isPiExtensionInstalled(piExtensionPath: ompExtensionPath, fm: fm)
+    }
+
+    // MARK: - OpenClaw plugin (#235)
+
+    private static let openclawPluginVersion = "v1"
+    private static let openclawPluginFiles = ["index.ts", "openclaw.plugin.json", "package.json"]
+
+    private static func openclawPluginSource(_ file: String) -> String? {
+        let parts = file.split(separator: ".", maxSplits: 1).map(String.init)
+        let name = parts[0]
+        let ext = parts.count > 1 ? parts[1] : ""
+        if let url = Bundle.appModule.url(forResource: name, withExtension: ext, subdirectory: "Resources/codeisland-openclaw"),
+           let src = try? String(contentsOf: url) { return src }
+        if let url = Bundle.appModule.url(forResource: name, withExtension: ext, subdirectory: "codeisland-openclaw"),
+           let src = try? String(contentsOf: url) { return src }
+        return nil
+    }
+
+    /// Install the OpenClaw plugin pack (#235): write the three plugin files to
+    /// ~/.openclaw/codeisland-plugin/ and register the pack in
+    /// ~/.openclaw/openclaw.json (plugins.load.paths + plugins.entries).
+    ///
+    /// openclaw.json is JSON5 — user files with comments/trailing commas won't
+    /// parse with JSONSerialization. In that case we still install the plugin
+    /// files but REFUSE to touch the config (#89: never clobber what we can't
+    /// parse) and report failure so the UI shows the manual step.
+    @discardableResult
+    static func installOpenclawPlugin(
+        openclawDir: String = openclawDir,
+        openclawPluginDir: String = openclawPluginDir,
+        openclawConfigPath: String = openclawConfigPath,
+        fm: FileManager
+    ) -> Bool {
+        // Only engage for machines that actually have OpenClaw.
+        guard fm.fileExists(atPath: openclawDir) else { return true }
+
+        try? fm.createDirectory(atPath: openclawPluginDir, withIntermediateDirectories: true)
+        for file in openclawPluginFiles {
+            guard let source = openclawPluginSource(file) else { return false }
+            let path = openclawPluginDir + "/" + file
+            if fm.fileExists(atPath: path) { try? fm.removeItem(atPath: path) }
+            guard fm.createFile(atPath: path, contents: Data(source.utf8)) else { return false }
+        }
+
+        return registerOpenclawPlugin(
+            openclawPluginDir: openclawPluginDir,
+            openclawConfigPath: openclawConfigPath,
+            fm: fm
+        )
+    }
+
+    /// Merge our plugin registration into openclaw.json. Creates the file when
+    /// missing; refuses to rewrite one that JSONSerialization can't parse.
+    static func registerOpenclawPlugin(
+        openclawPluginDir: String,
+        openclawConfigPath: String,
+        fm: FileManager
+    ) -> Bool {
+        var config: [String: Any] = [:]
+        if let data = fm.contents(atPath: openclawConfigPath), !data.isEmpty {
+            guard let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                return false  // JSON5 / unparseable — hands off (#89)
+            }
+            config = parsed
+        }
+
+        var plugins = config["plugins"] as? [String: Any] ?? [:]
+        var load = plugins["load"] as? [String: Any] ?? [:]
+        var paths = load["paths"] as? [Any] ?? []
+        if !paths.contains(where: { ($0 as? String) == openclawPluginDir }) {
+            paths.append(openclawPluginDir)
+        }
+        load["paths"] = paths
+        plugins["load"] = load
+
+        var entries = plugins["entries"] as? [String: Any] ?? [:]
+        var entry = entries["codeisland"] as? [String: Any] ?? [:]
+        entry["enabled"] = true
+        entries["codeisland"] = entry
+        plugins["entries"] = entries
+        config["plugins"] = plugins
+
+        guard let out = try? JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys]) else {
+            return false
+        }
+        return fm.createFile(atPath: openclawConfigPath, contents: out)
+    }
+
+    static func uninstallOpenclawPlugin(
+        openclawPluginDir: String = openclawPluginDir,
+        openclawConfigPath: String = openclawConfigPath,
+        fm: FileManager
+    ) {
+        // Remove only our plugin pack, never other extensions.
+        if fm.fileExists(atPath: openclawPluginDir + "/index.ts"),
+           let data = fm.contents(atPath: openclawPluginDir + "/index.ts"),
+           String(data: data, encoding: .utf8)?.contains("CodeIsland OpenClaw plugin") == true {
+            try? fm.removeItem(atPath: openclawPluginDir)
+        }
+
+        // De-register from a parseable config; leave JSON5 configs untouched.
+        guard let data = fm.contents(atPath: openclawConfigPath),
+              var config = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              var plugins = config["plugins"] as? [String: Any] else { return }
+
+        if var load = plugins["load"] as? [String: Any], var paths = load["paths"] as? [Any] {
+            paths.removeAll { ($0 as? String) == openclawPluginDir }
+            load["paths"] = paths
+            plugins["load"] = load
+        }
+        if var entries = plugins["entries"] as? [String: Any] {
+            entries.removeValue(forKey: "codeisland")
+            plugins["entries"] = entries
+        }
+        config["plugins"] = plugins
+        if let out = try? JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys]) {
+            fm.createFile(atPath: openclawConfigPath, contents: out)
+        }
+    }
+
+    static func isOpenclawPluginInstalled(
+        openclawPluginDir: String = openclawPluginDir,
+        fm: FileManager
+    ) -> Bool {
+        guard let data = fm.contents(atPath: openclawPluginDir + "/index.ts"),
+              let content = String(data: data, encoding: .utf8) else { return false }
+        return content.contains("CodeIsland OpenClaw plugin")
+            && content.contains("// version: \(openclawPluginVersion)")
     }
 
     /// Merge our plugin reference into an opencode.json file's contents.
@@ -2545,7 +3333,7 @@ struct ConfigInstaller {
     }
 
     /// Current OpenCode plugin version — bump when codeisland-opencode.js changes
-    private static let opencodePluginVersion = "v4"
+    private static let opencodePluginVersion = "v6"
 
     private static func isOpencodePluginInstalled(fm: FileManager) -> Bool {
         guard fm.fileExists(atPath: opencodePluginPath) else { return false }

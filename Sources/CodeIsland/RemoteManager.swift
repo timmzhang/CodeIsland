@@ -58,10 +58,19 @@ final class RemoteManager: ObservableObject {
 
     func updateHost(_ host: RemoteHost) {
         guard let index = hosts.firstIndex(where: { $0.id == host.id }) else { return }
+        let previous = hosts[index]
         let wasConnected = (connectionStatus[host.id] == .connected)
         hosts[index] = host
         save()
-        if wasConnected {
+        // Only bounce the tunnel when a field the SSH connection depends on
+        // changed. Local-only fields (name, cwdFilter — filtering happens in
+        // HookServer, #240) must not interrupt live sessions.
+        let connectionChanged = previous.host != host.host
+            || previous.user != host.user
+            || previous.port != host.port
+            || previous.identityFile != host.identityFile
+            || previous.authSocket != host.authSocket
+        if wasConnected && connectionChanged {
             reconnect(id: host.id)
         }
     }

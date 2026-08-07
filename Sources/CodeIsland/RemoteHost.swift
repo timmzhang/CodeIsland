@@ -12,6 +12,11 @@ struct RemoteHost: Identifiable, Codable, Equatable, Sendable {
     /// (1Password, Bitwarden, etc.) sign the handshake when the GUI launch
     /// didn't inherit the env var from a shell. See issue #81.
     var authSocket: String
+    /// Comma-separated cwd substrings. When non-empty, only remote sessions whose
+    /// working directory contains one of these substrings are shown — lets users on
+    /// a shared remote account scope the panel to their own project folders (#240).
+    /// Empty = show every session from this host (previous behavior).
+    var cwdFilter: String
 
     init(
         id: String = UUID().uuidString,
@@ -21,7 +26,8 @@ struct RemoteHost: Identifiable, Codable, Equatable, Sendable {
         port: Int? = nil,
         identityFile: String = "",
         autoConnect: Bool = false,
-        authSocket: String = ""
+        authSocket: String = "",
+        cwdFilter: String = ""
     ) {
         self.id = id
         self.name = name
@@ -31,9 +37,10 @@ struct RemoteHost: Identifiable, Codable, Equatable, Sendable {
         self.identityFile = identityFile
         self.autoConnect = autoConnect
         self.authSocket = authSocket
+        self.cwdFilter = cwdFilter
     }
 
-    // Backward compatibility: hosts persisted before authSocket existed decode with ""
+    // Backward compatibility: hosts persisted before authSocket/cwdFilter existed decode with ""
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try c.decode(String.self, forKey: .id)
@@ -44,6 +51,7 @@ struct RemoteHost: Identifiable, Codable, Equatable, Sendable {
         self.identityFile = try c.decode(String.self, forKey: .identityFile)
         self.autoConnect = try c.decode(Bool.self, forKey: .autoConnect)
         self.authSocket = try c.decodeIfPresent(String.self, forKey: .authSocket) ?? ""
+        self.cwdFilter = try c.decodeIfPresent(String.self, forKey: .cwdFilter) ?? ""
     }
 
     var sshTarget: String {
