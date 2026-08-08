@@ -8,6 +8,8 @@ enum IslandSurface: Equatable {
     case approvalCard(sessionId: String)
     /// 显示问答卡片
     case questionCard(sessionId: String)
+    /// Browser Use 可能在 Codex 原界面等待确认（只读提醒，不代答）
+    case browserUseAttention(sessionId: String)
     /// 自动展开显示完成通知
     case completionCard(sessionId: String)
     /// Token 用量详情页（从工具栏入口/hover 弹层进入）
@@ -19,7 +21,7 @@ enum IslandSurface: Equatable {
     var sessionId: String? {
         switch self {
         case .collapsed, .sessionList, .usageDetail: return nil
-        case .approvalCard(let id), .questionCard(let id), .completionCard(let id): return id
+        case .approvalCard(let id), .questionCard(let id), .browserUseAttention(let id), .completionCard(let id): return id
         }
     }
 }

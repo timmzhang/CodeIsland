@@ -39,6 +39,9 @@ public struct ConversationTailDelta: Equatable, Sendable {
     public let lastUserPrompt: String?
     public let lastAssistantMessage: String?
     public let permissionDecisions: [TranscriptPermissionDecision]
+    /// Codex Browser/MCP tool calls that reached `mcp_tool_call_end`. Browser Use
+    /// rejection paths can omit PostToolUse, so this is the reliable cleanup signal.
+    public let completedToolCallIds: [String]
     /// Token usage rows observed in the appended lines, in file order. Not yet
     /// deduplicated — consumers run them through a `ClaudeUsageDeduplicator`.
     public let usageEvents: [ClaudeUsageEvent]
@@ -55,6 +58,7 @@ public struct ConversationTailDelta: Equatable, Sendable {
         lastUserPrompt: String?,
         lastAssistantMessage: String?,
         permissionDecisions: [TranscriptPermissionDecision] = [],
+        completedToolCallIds: [String] = [],
         usageEvents: [ClaudeUsageEvent] = [],
         codexUsageEvents: [CodexUsageEvent] = [],
         turnStatus: ConversationTurnStatus? = nil,
@@ -65,6 +69,7 @@ public struct ConversationTailDelta: Equatable, Sendable {
         self.lastUserPrompt = lastUserPrompt
         self.lastAssistantMessage = lastAssistantMessage
         self.permissionDecisions = permissionDecisions
+        self.completedToolCallIds = completedToolCallIds
         self.usageEvents = usageEvents
         self.codexUsageEvents = codexUsageEvents
         self.turnStatus = turnStatus
@@ -75,7 +80,7 @@ public struct ConversationTailDelta: Equatable, Sendable {
     /// A delta only carries signal when at least one field is non-nil.
     public var isEmpty: Bool {
         lastUserPrompt == nil && lastAssistantMessage == nil
-            && permissionDecisions.isEmpty && usageEvents.isEmpty
+            && permissionDecisions.isEmpty && completedToolCallIds.isEmpty && usageEvents.isEmpty
             && codexUsageEvents.isEmpty && turnStatus == nil
             && !hasActivity && cursorQuestion == nil
     }
@@ -326,6 +331,7 @@ public final class JSONLTailer: @unchecked Sendable {
                 lastUserPrompt: scan.delta.lastUserPrompt,
                 lastAssistantMessage: scan.delta.lastAssistantMessage,
                 permissionDecisions: scan.delta.permissionDecisions,
+                completedToolCallIds: scan.delta.completedToolCallIds,
                 usageEvents: scan.delta.usageEvents,
                 codexUsageEvents: scan.delta.codexUsageEvents,
                 turnStatus: scan.delta.turnStatus,
@@ -364,6 +370,7 @@ public final class JSONLTailer: @unchecked Sendable {
             public var lastUserPrompt: String?
             public var lastAssistantMessage: String?
             public var permissionDecisions: [TranscriptPermissionDecision] = []
+            public var completedToolCallIds: [String] = []
             public var usageEvents: [ClaudeUsageEvent] = []
             public var codexUsageEvents: [CodexUsageEvent] = []
             public var turnStatus: ConversationTurnStatus?
@@ -373,6 +380,7 @@ public final class JSONLTailer: @unchecked Sendable {
                 lastUserPrompt == nil
                     && lastAssistantMessage == nil
                     && permissionDecisions.isEmpty
+                    && completedToolCallIds.isEmpty
                     && usageEvents.isEmpty
                     && codexUsageEvents.isEmpty
                     && turnStatus == nil
@@ -525,6 +533,10 @@ public final class JSONLTailer: @unchecked Sendable {
             // forward-compatible guess at the obvious name for a failed turn.
             case "task_complete", "turn_aborted", "turn_failed":
                 delta.turnStatus = .idle
+            case "mcp_tool_call_end":
+                if let callId = payload["call_id"] as? String, !callId.isEmpty {
+                    delta.completedToolCallIds.append(callId)
+                }
             default:
                 break
             }

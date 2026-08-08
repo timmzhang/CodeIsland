@@ -5,6 +5,14 @@ final class JSONLTailerTests: XCTestCase {
 
     // MARK: - scanLines (pure)
 
+    func testCodexMCPToolCallEndSurfacesCompletedCallId() {
+        let line = #"{"type":"event_msg","payload":{"type":"mcp_tool_call_end","call_id":"exec-browser-42"}}"#
+        let result = JSONLTailer.scanLines(Data((line + "\n").utf8))
+
+        XCTAssertEqual(result.delta.completedToolCallIds, ["exec-browser-42"])
+        XCTAssertTrue(result.delta.hasActivity)
+    }
+
     func testScanLinesEmptyInputProducesEmptyDeltaAndFragment() {
         let result = JSONLTailer.scanLines(Data())
         XCTAssertTrue(result.delta.isEmpty)

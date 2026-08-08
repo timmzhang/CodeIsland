@@ -9,6 +9,7 @@ import CodeIslandCore
 // Scenarios:
 //   working     — single session actively running tools
 //   approval    — session waiting for permission
+//   browser-attention — Browser Use may need confirmation in Codex
 //   question    — session with pending question
 //   completion  — session just finished
 //   multi       — 3 sessions in mixed states
@@ -25,6 +26,7 @@ import CodeIslandCore
 enum PreviewScenario: String, CaseIterable {
     case working
     case approval
+    case browserAttention = "browser-attention"
     case question
     case completion
     case multi
@@ -63,6 +65,8 @@ enum DebugHarness {
             applyWorking(to: appState)
         case .approval:
             applyApproval(to: appState)
+        case .browserAttention:
+            applyBrowserAttention(to: appState)
         case .question:
             applyQuestion(to: appState)
         case .completion:
@@ -138,6 +142,31 @@ enum DebugHarness {
         state.sessions["preview-approval"] = s
         state.activeSessionId = "preview-approval"
         state.surface = .approvalCard(sessionId: "preview-approval")
+    }
+
+    private static func applyBrowserAttention(to state: AppState) {
+        let sessionId = "preview-browser-attention"
+        var s = SessionSnapshot()
+        s.status = .running
+        s.cwd = "/Users/dev/CodeIsland"
+        s.model = "gpt-5"
+        s.source = "codex"
+        s.currentTool = BrowserUseAttentionDetector.toolName
+        s.toolDescription = "Browser Use"
+        s.lastUserPrompt = "Open the local preview and verify the interaction"
+        s.addRecentMessage(ChatMessage(isUser: true, text: s.lastUserPrompt ?? ""))
+        s.termApp = "Ghostty"
+
+        let attention = BrowserUseAttention(
+            toolUseId: "preview-browser-call",
+            sessionId: sessionId,
+            target: "http://127.0.0.1:48137/codeisland-browser-poc",
+            detectedAt: Date()
+        )
+        state.sessions[sessionId] = s
+        state.activeSessionId = sessionId
+        state.browserUseAttention = attention
+        state.surface = .browserUseAttention(sessionId: sessionId)
     }
 
     private static func applyQuestion(to state: AppState) {

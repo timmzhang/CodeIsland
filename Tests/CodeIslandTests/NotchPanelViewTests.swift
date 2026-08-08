@@ -280,6 +280,9 @@ final class NotchPanelViewTests: XCTestCase {
         XCTAssertTrue(
             UsagePopoverLayout.showsPanelBody(expanded: true, popoverVisible: true, surface: .questionCard(sessionId: "s1"))
         )
+        XCTAssertTrue(
+            UsagePopoverLayout.showsPanelBody(expanded: true, popoverVisible: true, surface: .browserUseAttention(sessionId: "s1"))
+        )
     }
 
     /// Clicking the entry opens the detail page with the cursor still resting on

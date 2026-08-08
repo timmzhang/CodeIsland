@@ -39,6 +39,30 @@ final class ClaudeDesktopSupportTests: XCTestCase {
         XCTAssertNil(TerminalActivator.sourceToNativeAppBundleId["claude"])
     }
 
+    func testClickJumpDoesNotStealTerminalCodexSessions() {
+        // A Codex CLI hook already carries its real terminal bundle. A running
+        // Codex Desktop app must not override that routing signal.
+        var session = makeSession(termBundleId: "com.mitchellh.ghostty", source: "codex")
+        session.termApp = "ghostty"
+        XCTAssertNil(TerminalActivator.sourceNativeAppFallbackBundleId(for: session))
+    }
+
+    func testCodexSourceFallbackRemainsAvailableWithoutTerminalMetadata() {
+        let session = makeSession(termBundleId: nil, source: "codex")
+        XCTAssertEqual(
+            TerminalActivator.sourceNativeAppFallbackBundleId(for: session),
+            "com.openai.codex"
+        )
+    }
+
+    func testNativeAppBundleRegistryInitializesAndRecognizesClaudeDesktop() {
+        // Accessing the registry is the regression: duplicate dictionary keys trap
+        // during static initialization before any click-to-jump routing can run.
+        XCTAssertTrue(TerminalActivator.isNativeAppBundle("com.anthropic.claudefordesktop"))
+        XCTAssertTrue(TerminalActivator.isNativeAppBundle("com.openai.codex"))
+        XCTAssertFalse(TerminalActivator.isNativeAppBundle("com.mitchellh.ghostty"))
+    }
+
     /// AppState is main-actor isolated; upstream's class is not annotated, so this
     /// local regression carries the isolation itself.
     @MainActor

@@ -100,7 +100,7 @@ enum UsagePopoverLayout {
     ///   retracting there would make the page vanish a moment after it appeared.
     static func retractsBody(of surface: IslandSurface) -> Bool {
         switch surface {
-        case .approvalCard, .questionCard, .usageDetail: return false
+        case .approvalCard, .questionCard, .browserUseAttention, .usageDetail: return false
         default: return true
         }
     }
@@ -344,6 +344,16 @@ struct NotchPanelView: View {
                             )
                             .transition(.blurFade.combined(with: .scale(scale: 0.96, anchor: .top)))
                         }
+                    case .browserUseAttention(let sid):
+                        if let attention = appState.browserUseAttention,
+                           attention.sessionId == sid {
+                            BrowserUseAttentionBar(
+                                attention: attention,
+                                onOpen: { appState.openBrowserUseAttentionSession() },
+                                onDismiss: { appState.dismissBrowserUseAttention() }
+                            )
+                            .transition(.blurFade.combined(with: .scale(scale: 0.96, anchor: .top)))
+                        }
                     case .completionCard:
                         SessionListView(appState: appState, onlySessionId: appState.justCompletedSessionId)
                             .transition(.blurFade.combined(with: .move(edge: .top)))
@@ -410,7 +420,7 @@ struct NotchPanelView: View {
                     return
                 }
                 switch appState.surface {
-                case .approvalCard, .questionCard: return
+                case .approvalCard, .questionCard, .browserUseAttention: return
                 case .completionCard:
                     // Completion card: mark entered on hover-in, block collapse until entered
                     if hovering {
@@ -1313,6 +1323,112 @@ private struct ApprovalBar: View {
     @MainActor
     private func runJumpFailureShakeAnimation() async {
         await JumpAnimationHelper.runShake(offset: $failureShakeOffset)
+    }
+}
+
+// MARK: - Browser Use Attention (display-only, auto-expanded)
+
+@MainActor
+private struct BrowserUseAttentionBar: View {
+    let attention: BrowserUseAttention
+    let onOpen: () -> Void
+    let onDismiss: () -> Void
+    @ObservedObject private var l10n = L10n.shared
+
+    private let orange = Color(red: 1.0, green: 0.7, blue: 0.28)
+
+    var body: some View {
+        VStack(spacing: 9) {
+            HStack(spacing: 7) {
+                Text("!")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(orange)
+                    .frame(width: 16, height: 16)
+                    .background(orange.opacity(0.12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(orange.opacity(0.55), lineWidth: 1)
+                    )
+                Text(l10n["browser_use_attention_title"])
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(orange)
+                Text(l10n["browser_use_attention_possible"])
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.62))
+                Spacer()
+            }
+
+            Button(action: onOpen) {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(l10n["browser_use_attention_body"])
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.88))
+                            .lineLimit(2)
+                        if let target = BrowserUseAttentionDetector.displayTarget(attention.target),
+                           !target.isEmpty {
+                            Text(target)
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.43))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(.white.opacity(0.055))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .strokeBorder(.white.opacity(0.19), lineWidth: 1)
+                            )
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(orange)
+                    }
+                    .frame(width: 27, height: 27)
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 9)
+                .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(.white.opacity(0.035))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7)
+                        .strokeBorder(orange.opacity(0.22), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+
+            HStack(spacing: 10) {
+                Text(l10n["browser_use_attention_note"])
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.white.opacity(0.43))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                HStack(spacing: 6) {
+                    PixelButton(
+                        label: l10n["dismiss"],
+                        fg: .white.opacity(0.95),
+                        bg: Color(red: 0.25, green: 0.25, blue: 0.25),
+                        border: .white.opacity(0.28),
+                        action: onDismiss
+                    )
+                    PixelButton(
+                        label: l10n["browser_use_attention_open"],
+                        fg: .white.opacity(0.95),
+                        bg: Color(red: 0.10, green: 0.27, blue: 0.12),
+                        border: Color(red: 0.28, green: 0.62, blue: 0.32),
+                        action: onOpen
+                    )
+                }
+                .frame(width: 210)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
 }
 

@@ -266,9 +266,9 @@ class PanelWindowController: NSObject, NSWindowDelegate {
         globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             Task { @MainActor in
                 guard let self = self, self.appState.surface.isExpanded else { return }
-                // Don't close during approval/question
+                // Don't close during approval/question/display-only attention
                 switch self.appState.surface {
-                case .approvalCard, .questionCard: return
+                case .approvalCard, .questionCard, .browserUseAttention: return
                 default: break
                 }
                 // Don't collapse if click is within the panel frame (event leaked on external display)

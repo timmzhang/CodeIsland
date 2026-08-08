@@ -68,6 +68,7 @@ final class AppState {
     var activeSessionId: String?
     var permissionQueue: [PermissionRequest] = []
     var questionQueue: [QuestionRequest] = []
+    var browserUseAttention: BrowserUseAttention?
 
     @ObservationIgnored
     private(set) var recentHookEvents: [DiagnosticHookEvent] = []
@@ -101,6 +102,10 @@ final class AppState {
     /// permission requests back to their originating tool call. See AppState+ToolUseCache.
     @ObservationIgnored
     var pendingToolUses: [String: PreToolUseRecord] = [:]
+    @ObservationIgnored
+    var browserUseAttentionDelayTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored
+    var browserUseAttentionTimeoutTask: Task<Void, Never>?
     /// Records the transcript path currently watched for each session so we only
     /// reattach when the path actually changes. See AppState+TranscriptTailer.
     @ObservationIgnored
@@ -184,7 +189,7 @@ final class AppState {
     /// True when an interactive card (approval or question) is visible — completions must queue.
     private var isShowingInteractive: Bool {
         switch surface {
-        case .approvalCard, .questionCard: return true
+        case .approvalCard, .questionCard, .browserUseAttention: return true
         default: return false
         }
     }
@@ -699,6 +704,7 @@ final class AppState {
         // Resume ALL pending continuations for this session
         drainPermissions(forSession: sessionId, reason: "removeSession")
         drainQuestions(forSession: sessionId, reason: "removeSession")
+        clearBrowserUseAttention(forSessionId: sessionId, showNext: false)
 
         if surface.sessionId == sessionId {
             autoCollapseTask?.cancel()
@@ -1083,7 +1089,7 @@ final class AppState {
                 // (e.g. approval/question card popped up, session was removed)
                 guard self.sessions[sessionId] != nil else { return }
                 switch self.surface {
-                case .approvalCard, .questionCard: return  // don't overwrite higher-priority surfaces
+                case .approvalCard, .questionCard, .browserUseAttention: return  // don't overwrite interactive surfaces
                 default: break
                 }
                 if !tabVisible {
@@ -1258,6 +1264,7 @@ final class AppState {
         // Cache PreToolUse payloads so downstream events sharing tool_use_id can be
         // correlated, and drain queue entries whose agent already moved on.
         cachePreToolUseIfApplicable(event)
+        updateBrowserUseAttention(for: event)
         resolveToolUseIfCompleted(event)
         // #216: permission requests with no correlatable tool_use_id can't be drained by
         // resolveToolUseIfCompleted. A follow-up activity event means the user already
@@ -2199,6 +2206,13 @@ final class AppState {
                 surface = .questionCard(sessionId: sid)
             }
             return true
+        } else if let attention = browserUseAttention {
+            activeSessionId = attention.sessionId
+            if surface != .browserUseAttention(sessionId: attention.sessionId) {
+                surface = .browserUseAttention(sessionId: attention.sessionId)
+                SoundManager.shared.handleEvent("PermissionRequest")
+            }
+            return true
         } else if !completionQueue.isEmpty {
             while let next = completionQueue.first {
                 completionQueue.removeFirst()
@@ -2211,6 +2225,8 @@ final class AppState {
         } else if case .approvalCard = surface {
             surface = .collapsed
         } else if case .questionCard = surface {
+            surface = .collapsed
+        } else if case .browserUseAttention = surface {
             surface = .collapsed
         }
         return false
@@ -3548,6 +3564,8 @@ final class AppState {
         saveTimer?.invalidate()
         saveTimer = nil
         discoveryScanTask?.cancel()
+        for task in browserUseAttentionDelayTasks.values { task.cancel() }
+        browserUseAttentionTimeoutTask?.cancel()
         discoveryScanTask = nil
         pendingDiscoveryRescan = false
         for key in Array(processMonitors.keys) { stopMonitor(key) }

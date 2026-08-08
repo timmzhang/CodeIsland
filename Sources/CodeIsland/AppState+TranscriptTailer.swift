@@ -236,6 +236,7 @@ extension AppState {
                 decision: permissionDecision.decision
             )
         }
+        resolveBrowserUseAttentionFromTranscript(toolUseIds: delta.completedToolCallIds)
 
         guard var session = sessions[delta.sessionId] else { return }
         var mutated = false
@@ -255,6 +256,7 @@ extension AppState {
                 session.status = .idle
                 session.currentTool = nil
                 session.toolDescription = nil
+                clearBrowserUseAttention(forSessionId: delta.sessionId)
             }
             // A status-only event is still activity. This matters for a long Codex
             // turn whose transcript has not emitted a message yet.

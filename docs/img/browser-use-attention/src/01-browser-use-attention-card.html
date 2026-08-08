@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CodeIsland · Browser Use 提示卡视觉稿</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --panel: #000;
+    --card: #0d0d0e;
+    --line: rgba(255, 255, 255, .15);
+    --text: rgba(255, 255, 255, .95);
+    --muted: rgba(255, 255, 255, .54);
+    --subtle: rgba(255, 255, 255, .36);
+    --orange: #ffb347;
+    --orange-soft: rgba(255, 179, 71, .12);
+    --orange-line: rgba(255, 179, 71, .32);
+    --green: #4cd966;
+    --green-bg: #193d1d;
+    --green-line: #479e52;
+    --mono: "SFMono-Regular", "SF Mono", Menlo, Monaco, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    width: 1440px;
+    height: 900px;
+    margin: 0;
+    overflow: hidden;
+    background: #142534;
+  }
+
+  body {
+    position: relative;
+    font-family: var(--sans);
+    color: var(--text);
+    background:
+      radial-gradient(900px 560px at 14% 108%, rgba(56, 142, 171, .86), transparent 61%),
+      radial-gradient(760px 520px at 91% 100%, rgba(130, 82, 164, .75), transparent 64%),
+      radial-gradient(670px 420px at 70% 18%, rgba(44, 83, 115, .76), transparent 68%),
+      linear-gradient(145deg, #162d3e 0%, #233243 48%, #3f2d55 100%);
+  }
+
+  body::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(180deg, rgba(0,0,0,.08), rgba(0,0,0,.18)),
+      repeating-linear-gradient(135deg, transparent 0 18px, rgba(255,255,255,.006) 18px 19px);
+    pointer-events: none;
+  }
+
+  .menu-bar {
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    color: rgba(255,255,255,.84);
+    background: rgba(9, 13, 18, .32);
+    backdrop-filter: blur(20px) saturate(130%);
+    -webkit-backdrop-filter: blur(20px) saturate(130%);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -.1px;
+  }
+
+  .menu-left, .menu-right {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+  }
+
+  .menu-left { gap: 20px; }
+  .apple { font-size: 16px; margin-right: -8px; transform: translateY(-1px); }
+  .menu-right { font-weight: 500; gap: 14px; }
+
+  .terminal {
+    position: absolute;
+    left: 104px;
+    top: 88px;
+    width: 1232px;
+    height: 728px;
+    border-radius: 14px;
+    overflow: hidden;
+    background: rgba(12, 14, 18, .92);
+    border: 1px solid rgba(255,255,255,.16);
+    box-shadow: 0 34px 90px rgba(0,0,0,.48);
+  }
+
+  .terminal-titlebar {
+    height: 42px;
+    display: flex;
+    align-items: center;
+    padding: 0 15px;
+    gap: 8px;
+    background: rgba(34, 36, 42, .97);
+    border-bottom: 1px solid rgba(255,255,255,.08);
+  }
+
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .red { background: #ff5f57; }
+  .yellow { background: #febc2e; }
+  .green { background: #28c840; }
+
+  .terminal-title {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(255,255,255,.55);
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .terminal-body {
+    padding: 27px 31px;
+    font-family: var(--mono);
+    font-size: 15px;
+    line-height: 1.75;
+    color: rgba(229,233,240,.68);
+  }
+
+  .terminal-body .dim { color: rgba(229,233,240,.34); }
+  .terminal-body .blue { color: rgba(114,171,255,.72); }
+  .terminal-body .teal { color: rgba(86,211,181,.68); }
+  .terminal-body .orange { color: rgba(255,160,99,.78); }
+  .terminal-body .prompt { color: rgba(94,224,123,.76); }
+  .terminal-body .blank { height: 20px; }
+
+  .focus-shade {
+    position: absolute;
+    inset: 30px 0 0;
+    background: rgba(3, 7, 10, .38);
+    backdrop-filter: blur(1.6px);
+    -webkit-backdrop-filter: blur(1.6px);
+  }
+
+  .island-wrap {
+    position: absolute;
+    z-index: 10;
+    top: 0;
+    left: 50%;
+    width: 580px;
+    transform: translateX(-50%);
+    filter: drop-shadow(0 26px 36px rgba(0,0,0,.5));
+  }
+
+  .island {
+    width: 580px;
+    background: var(--panel);
+    border-radius: 0 0 24px 24px;
+    overflow: hidden;
+    box-shadow: inset 0 -1px rgba(255,255,255,.04);
+  }
+
+  .compact-bar {
+    height: 38px;
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+
+  .compact-left,
+  .compact-right {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .compact-right {
+    justify-content: flex-end;
+    color: var(--orange);
+  }
+
+  .cli-icon {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    image-rendering: auto;
+  }
+
+  .session-name { font-weight: 700; color: rgba(255,255,255,.86); }
+  .session-count { color: rgba(255,255,255,.40); }
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--orange);
+    box-shadow: 0 0 9px rgba(255,179,71,.74);
+  }
+  .gear { color: rgba(255,255,255,.38); font-family: var(--sans); font-size: 14px; margin-left: 3px; }
+
+  .dash-line {
+    height: 1px;
+    margin: 0 12px;
+    background: repeating-linear-gradient(90deg, rgba(255,255,255,.16) 0 4px, transparent 4px 7px);
+  }
+
+  .attention {
+    padding: 12px 14px 14px;
+    font-family: var(--mono);
+  }
+
+  .attention-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 18px;
+    margin: 0 0 9px;
+    color: var(--orange);
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  .bang {
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255,179,71,.54);
+    border-radius: 4px;
+    background: var(--orange-soft);
+    font-family: var(--sans);
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .attention-head .possible {
+    color: rgba(255,255,255,.62);
+    font-weight: 600;
+  }
+
+  .context-card {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 16px;
+    min-height: 58px;
+    padding: 9px 11px;
+    border: 1px solid rgba(255,255,255,.06);
+    border-left-color: var(--orange-line);
+    border-radius: 7px;
+    background: linear-gradient(90deg, rgba(255,179,71,.055), rgba(255,255,255,.035) 42%, rgba(255,255,255,.028));
+  }
+
+  .context-title {
+    color: rgba(255,255,255,.88);
+    font-size: 10.5px;
+    line-height: 1.4;
+    margin-bottom: 4px;
+  }
+
+  .context-url {
+    max-width: 400px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: rgba(255,255,255,.43);
+    font-size: 9.5px;
+  }
+
+  .browser-glyph {
+    width: 27px;
+    height: 27px;
+    position: relative;
+    border: 1px solid rgba(255,255,255,.19);
+    border-radius: 6px;
+    background: rgba(255,255,255,.055);
+  }
+
+  .browser-glyph::before {
+    content: "";
+    position: absolute;
+    left: 5px;
+    right: 5px;
+    top: 6px;
+    height: 3px;
+    border-top: 1px solid rgba(255,255,255,.46);
+    border-bottom: 1px solid rgba(255,255,255,.16);
+  }
+
+  .browser-glyph::after {
+    content: "↗";
+    position: absolute;
+    right: 5px;
+    bottom: 3px;
+    color: var(--orange);
+    font-family: var(--sans);
+    font-size: 13px;
+  }
+
+  .attention-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-top: 10px;
+  }
+
+  .explain {
+    color: rgba(255,255,255,.43);
+    font-family: var(--sans);
+    font-size: 10px;
+    letter-spacing: .05px;
+    white-space: nowrap;
+  }
+
+  .actions { display: flex; align-items: center; gap: 6px; }
+
+  .pixel-button {
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 0 11px;
+    border-radius: 5px;
+    border: 1px solid rgba(255,255,255,.28);
+    color: rgba(255,255,255,.92);
+    background: #3f3f3f;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    box-shadow: inset 0 1px rgba(255,255,255,.06), 0 1px 0 rgba(0,0,0,.7);
+  }
+
+  .pixel-button.primary {
+    min-width: 96px;
+    color: rgba(255,255,255,.97);
+    border-color: var(--green-line);
+    background: var(--green-bg);
+  }
+
+  #hover:target ~ .island .pixel-button.primary {
+    color: #fff;
+    border-color: #65d273;
+    background: #215528;
+    box-shadow: 0 0 0 2px rgba(76,217,102,.18), 0 0 17px rgba(76,217,102,.19), inset 0 1px rgba(255,255,255,.09);
+    transform: translateY(-1px);
+  }
+
+  #hover:target ~ .island .attention {
+    cursor: default;
+  }
+
+  .fake-pointer {
+    display: none;
+    position: absolute;
+    z-index: 30;
+    top: 206px;
+    left: 496px;
+    width: 19px;
+    height: 26px;
+    filter: drop-shadow(0 1px 1px rgba(0,0,0,.75));
+  }
+
+  #hover:target ~ .fake-pointer { display: block; }
+
+  .pointer-shape {
+    width: 0;
+    height: 0;
+    border-left: 8px solid #fff;
+    border-top: 13px solid transparent;
+    border-bottom: 4px solid transparent;
+    transform: rotate(-20deg);
+    filter: drop-shadow(1px 1px 0 #111) drop-shadow(-1px -1px 0 #111);
+  }
+
+  .desktop-label {
+    position: absolute;
+    left: 120px;
+    bottom: 39px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 10px;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 7px;
+    color: rgba(255,255,255,.46);
+    background: rgba(8,12,18,.27);
+    backdrop-filter: blur(10px);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .02em;
+  }
+
+  .desktop-label i {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--orange);
+    box-shadow: 0 0 8px rgba(255,179,71,.55);
+  }
+
+  @media (max-width: 800px) {
+    html, body { width: 100vw; height: 100vh; }
+    .menu-bar, .desktop-label { display: none; }
+    .terminal {
+      left: 28px;
+      top: 44px;
+      width: calc(100vw - 56px);
+      height: 260px;
+    }
+    .terminal-body { padding: 25px 27px; font-size: 12px; }
+    .focus-shade { inset: 0; }
+  }
+</style>
+</head>
+<body>
+  <div class="menu-bar" aria-hidden="true">
+    <div class="menu-left"><span class="apple">●</span><span>Codex</span><span>File</span><span>Edit</span><span>View</span></div>
+    <div class="menu-right"><span>⌁</span><span>◔</span><span>100%</span><span>Sat Aug 8&nbsp;&nbsp;21:47</span></div>
+  </div>
+
+  <div class="terminal" aria-hidden="true">
+    <div class="terminal-titlebar">
+      <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
+      <span class="terminal-title">CodeIsland_p-3q1u — zsh — 132×36</span>
+    </div>
+    <div class="terminal-body">
+      <div><span class="teal">╭─</span> CodeIsland <span class="dim">· Browser Use</span></div>
+      <div><span class="teal">│</span> <span class="blue">navigate</span>(<span class="orange">"http://127.0.0.1:48137/codeisland-browser-poc"</span>)</div>
+      <div><span class="teal">╰─</span> <span class="dim">Waiting for browser confirmation…</span></div>
+      <div class="blank"></div>
+      <div><span class="prompt">›</span> 请在 Codex 窗口中查看浏览器操作</div>
+      <div><span class="dim">  CodeIsland 仅提示，不会代替你同意或拒绝。</span></div>
+      <div class="blank"></div>
+      <div><span class="dim">  The browser session is paused until the user responds.</span></div>
+    </div>
+  </div>
+
+  <div class="focus-shade" aria-hidden="true"></div>
+
+  <div class="island-wrap">
+    <span id="hover" aria-hidden="true"></span>
+    <div class="island">
+      <div class="compact-bar">
+        <div class="compact-left">
+          <img class="cli-icon" src="../../../../Sources/CodeIsland/Resources/cli-icons/codex.png" alt="Codex">
+          <span class="session-name">CodeIsland</span>
+          <span class="session-count">· Codex</span>
+        </div>
+        <div class="compact-right">
+          <span class="status-dot"></span>
+          <span>等待处理</span>
+          <span class="gear">⚙</span>
+        </div>
+      </div>
+      <div class="dash-line"></div>
+      <div class="attention">
+        <div class="attention-head">
+          <span class="bang">!</span>
+          <span>Browser Use</span>
+          <span class="possible">可能需要确认</span>
+        </div>
+
+        <div class="context-card">
+          <div>
+            <div class="context-title">Codex 已发起页面操作，请前往原会话查看</div>
+            <div class="context-url">127.0.0.1:48137/codeisland-browser-poc</div>
+          </div>
+          <div class="browser-glyph" aria-hidden="true"></div>
+        </div>
+
+        <div class="attention-foot">
+          <div class="explain">仅作提醒 · CodeIsland 不会代为确认</div>
+          <div class="actions">
+            <div class="pixel-button">忽略</div>
+            <div class="pixel-button primary">前往处理 <span>→</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="fake-pointer" aria-hidden="true"><div class="pointer-shape"></div></div>
+  </div>
+
+  <div class="desktop-label" aria-hidden="true"><i></i><span>提示态 · 自动展开，不接管浏览器权限</span></div>
+</body>
+</html>

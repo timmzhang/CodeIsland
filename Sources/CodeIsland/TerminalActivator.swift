@@ -59,7 +59,6 @@ struct TerminalActivator {
     /// When termBundleId matches, bring that app to front;
     /// otherwise fall through to terminal tab-matching.
     private static let nativeAppBundles: [String: String] = [
-        "com.anthropic.claudefordesktop": "Claude",
         "com.openai.codex": "Codex",
         "com.todesktop.230313mzl4w4u92": "Cursor",
         "com.trae.app": "Trae",
@@ -76,6 +75,23 @@ struct TerminalActivator {
         // steal their click-to-jump whenever the desktop app happens to be open.
         "com.anthropic.claudefordesktop": "Claude",
     ]
+
+    static func isNativeAppBundle(_ bundleId: String) -> Bool {
+        nativeAppBundles[bundleId] != nil
+    }
+
+    /// Codex uses the same source identifier in Desktop and CLI modes. Any
+    /// captured terminal identity is therefore authoritative and must win over
+    /// the source-based Desktop fallback. Other sources retain their existing
+    /// preference behavior (notably OpenCode hosted by its Desktop app).
+    static func sourceNativeAppFallbackBundleId(for session: SessionSnapshot) -> String? {
+        if session.source == "codex" {
+            let hasTerminalBundle = !(session.termBundleId?.isEmpty ?? true)
+            let hasTerminalName = !(session.termApp?.isEmpty ?? true)
+            if hasTerminalBundle || hasTerminalName { return nil }
+        }
+        return sourceToNativeAppBundleId[session.source]
+    }
 
     private static let sourceNativeAppOverrides: [String: String] = [
         "trae": "com.trae.app",
@@ -101,7 +117,7 @@ struct TerminalActivator {
         // activateIDEWindow falls back to a plain app-level activation when there's
         // no cwd or no matching window, so this never regresses single-window apps.
         if let bundleId = session.termBundleId,
-           nativeAppBundles[bundleId] != nil {
+           isNativeAppBundle(bundleId) {
             activateIDEWindow(bundleId: bundleId, cwd: session.cwd)
             return
         }
@@ -145,7 +161,7 @@ struct TerminalActivator {
         // editing in VS Code — without this, the inherited TERM_PROGRAM=ghostty would jump
         // to the wrong terminal. Also covers cases where the terminal bundle ID is present
         // but the user wants to focus the desktop IDE instead (e.g. opencode → OpenCode).
-        if let nativeBundleId = sourceToNativeAppBundleId[session.source],
+        if let nativeBundleId = sourceNativeAppFallbackBundleId(for: session),
            NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == nativeBundleId }) {
             activateByBundleId(nativeBundleId)
             return
