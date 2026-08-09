@@ -126,6 +126,13 @@ public struct SessionSnapshot: Sendable {
     /// Cline runs hooks asynchronously (background bridge), so events from prior tools can
     /// arrive after a TaskCancel and revive the session. This flag drops those stale events.
     public var taskRoundEnded: Bool = false
+    /// Claude Bash commands that were moved into the CLI's background task queue.
+    /// The transcript tailer owns this set because hook payloads do not expose the
+    /// queue lifecycle. A Stop hook must not mark the session idle while it is non-empty.
+    public var activeBackgroundTaskIds: Set<String> = []
+    /// True when the latest parent Stop was deferred specifically because a background
+    /// command is still running. Cleared when a new foreground turn begins or the queue drains.
+    public var isWaitingForBackgroundTasks: Bool = false
     public var sessionTitle: String?
     public var sessionTitleSource: SessionTitleSource?
     public var providerSessionId: String?
@@ -890,6 +897,7 @@ public func reduceEvent(
     case "UserPromptSubmit":
         sessions[sessionId]?.interrupted = false
         sessions[sessionId]?.taskRoundEnded = false
+        sessions[sessionId]?.isWaitingForBackgroundTasks = false
         sessions[sessionId]?.status = .processing
         sessions[sessionId]?.currentTool = nil
         sessions[sessionId]?.toolDescription = nil
@@ -918,6 +926,7 @@ public func reduceEvent(
         }
     case "PreToolUse":
         if !preserveWaiting {
+            sessions[sessionId]?.isWaitingForBackgroundTasks = false
             sessions[sessionId]?.status = .running
             sessions[sessionId]?.currentTool = event.toolName
             sessions[sessionId]?.toolDescription = event.toolDescription
@@ -1025,6 +1034,7 @@ public func reduceEvent(
         let hasActiveSubagents = sessions[sessionId]?.subagents.values.contains {
             $0.status != .idle
         } == true
+        let hasActiveBackgroundTasks = sessions[sessionId]?.activeBackgroundTaskIds.isEmpty == false
         // Separate-mode Cursor Tasks have no agent_id, so merge later must see
         // this id as closed — otherwise a still-live IDE `_ppid` resuscitates them.
         // Only self-tombstone foldable Task cards (transcript parent ≠ session id),
@@ -1068,15 +1078,20 @@ public func reduceEvent(
 
         // Parent chat Stop while folded Tasks are still working — keep the card
         // active and do not pop a premature completion (same as AfterAgentResponse).
-        if hasActiveSubagents {
+        if hasActiveSubagents || hasActiveBackgroundTasks {
             if !isWaiting {
                 sessions[sessionId]?.status = .running
-                if sessions[sessionId]?.currentTool == nil {
+                if hasActiveSubagents, sessions[sessionId]?.currentTool == nil {
                     sessions[sessionId]?.currentTool = "Agent"
+                } else if !hasActiveSubagents {
+                    sessions[sessionId]?.currentTool = "Bash"
+                    sessions[sessionId]?.toolDescription = "Background shell"
                 }
             }
+            sessions[sessionId]?.isWaitingForBackgroundTasks = hasActiveBackgroundTasks
             // Do not latch `interrupted` onto a still-active parent+Task card.
         } else {
+            sessions[sessionId]?.isWaitingForBackgroundTasks = false
             sessions[sessionId]?.interrupted = wasInterrupted
             sessions[sessionId]?.status = .idle
             sessions[sessionId]?.currentTool = nil

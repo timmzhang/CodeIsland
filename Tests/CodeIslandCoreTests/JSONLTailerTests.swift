@@ -149,6 +149,37 @@ final class JSONLTailerTests: XCTestCase {
         XCTAssertFalse(result.delta.isEmpty)
     }
 
+    func testScanLinesTracksClaudeBackgroundShellLifecycle() {
+        let started = #"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"Command running in background"}]},"toolUseResult":{"backgroundTaskId":"bg-123"}}"#
+        let finished = #"{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<task-id>bg-123</task-id>\n<status>completed</status>\n</task-notification>"}"#
+
+        let result = JSONLTailer.scanLines(Data((started + "\n" + finished + "\n").utf8))
+
+        XCTAssertEqual(result.delta.startedBackgroundTaskIds, ["bg-123"])
+        XCTAssertEqual(result.delta.finishedBackgroundTaskIds, ["bg-123"])
+        XCTAssertTrue(result.delta.hasActivity)
+        XCTAssertNil(result.delta.lastUserPrompt, "system task notifications must not replace the real prompt")
+    }
+
+    func testScanLinesDeduplicatesRepeatedClaudeTaskNotifications() {
+        let notification = "<task-notification>\\n<task-id>bg-456</task-id>\\n<status>failed</status>\\n</task-notification>"
+        let queued = #"{"type":"queue-operation","operation":"enqueue","content":"\#(notification)"}"#
+        let delivered = #"{"type":"user","message":{"role":"user","content":"\#(notification)"},"promptSource":"system"}"#
+
+        let result = JSONLTailer.scanLines(Data((queued + "\n" + delivered + "\n").utf8))
+
+        XCTAssertEqual(result.delta.finishedBackgroundTaskIds, ["bg-456"])
+        XCTAssertNil(result.delta.lastUserPrompt)
+    }
+
+    func testScanLinesIgnoresNonterminalClaudeTaskNotifications() {
+        let running = #"{"type":"queue-operation","content":"<task-notification>\n<task-id>bg-789</task-id>\n<status>running</status>\n</task-notification>"}"#
+
+        let result = JSONLTailer.scanLines(Data((running + "\n").utf8))
+
+        XCTAssertTrue(result.delta.finishedBackgroundTaskIds.isEmpty)
+    }
+
     // MARK: - extractText
 
     func testExtractTextFromPlainString() {

@@ -49,6 +49,10 @@ public struct ConversationTailDelta: Equatable, Sendable {
     /// These share the provider's deduplicator with app-server notifications
     /// before they reach the usage store.
     public let codexUsageEvents: [CodexUsageEvent]
+    /// Claude Bash tasks moved into the CLI's background queue by this delta.
+    public let startedBackgroundTaskIds: [String]
+    /// Background task notifications that reached a terminal state in this delta.
+    public let finishedBackgroundTaskIds: [String]
     public let turnStatus: ConversationTurnStatus?
     public let hasActivity: Bool
     public let cursorQuestion: CursorQuestionSignal?
@@ -61,6 +65,8 @@ public struct ConversationTailDelta: Equatable, Sendable {
         completedToolCallIds: [String] = [],
         usageEvents: [ClaudeUsageEvent] = [],
         codexUsageEvents: [CodexUsageEvent] = [],
+        startedBackgroundTaskIds: [String] = [],
+        finishedBackgroundTaskIds: [String] = [],
         turnStatus: ConversationTurnStatus? = nil,
         hasActivity: Bool = false,
         cursorQuestion: CursorQuestionSignal? = nil
@@ -72,6 +78,8 @@ public struct ConversationTailDelta: Equatable, Sendable {
         self.completedToolCallIds = completedToolCallIds
         self.usageEvents = usageEvents
         self.codexUsageEvents = codexUsageEvents
+        self.startedBackgroundTaskIds = startedBackgroundTaskIds
+        self.finishedBackgroundTaskIds = finishedBackgroundTaskIds
         self.turnStatus = turnStatus
         self.hasActivity = hasActivity
         self.cursorQuestion = cursorQuestion
@@ -81,7 +89,9 @@ public struct ConversationTailDelta: Equatable, Sendable {
     public var isEmpty: Bool {
         lastUserPrompt == nil && lastAssistantMessage == nil
             && permissionDecisions.isEmpty && completedToolCallIds.isEmpty && usageEvents.isEmpty
-            && codexUsageEvents.isEmpty && turnStatus == nil
+            && codexUsageEvents.isEmpty
+            && startedBackgroundTaskIds.isEmpty && finishedBackgroundTaskIds.isEmpty
+            && turnStatus == nil
             && !hasActivity && cursorQuestion == nil
     }
 }
@@ -334,6 +344,8 @@ public final class JSONLTailer: @unchecked Sendable {
                 completedToolCallIds: scan.delta.completedToolCallIds,
                 usageEvents: scan.delta.usageEvents,
                 codexUsageEvents: scan.delta.codexUsageEvents,
+                startedBackgroundTaskIds: scan.delta.startedBackgroundTaskIds,
+                finishedBackgroundTaskIds: scan.delta.finishedBackgroundTaskIds,
                 turnStatus: scan.delta.turnStatus,
                 hasActivity: scan.delta.hasActivity,
                 cursorQuestion: scan.delta.cursorQuestion
@@ -373,6 +385,8 @@ public final class JSONLTailer: @unchecked Sendable {
             public var completedToolCallIds: [String] = []
             public var usageEvents: [ClaudeUsageEvent] = []
             public var codexUsageEvents: [CodexUsageEvent] = []
+            public var startedBackgroundTaskIds: [String] = []
+            public var finishedBackgroundTaskIds: [String] = []
             public var turnStatus: ConversationTurnStatus?
             public var hasActivity = false
             public var cursorQuestion: CursorQuestionSignal?
@@ -383,6 +397,8 @@ public final class JSONLTailer: @unchecked Sendable {
                     && completedToolCallIds.isEmpty
                     && usageEvents.isEmpty
                     && codexUsageEvents.isEmpty
+                    && startedBackgroundTaskIds.isEmpty
+                    && finishedBackgroundTaskIds.isEmpty
                     && turnStatus == nil
                     && !hasActivity
                     && cursorQuestion == nil
@@ -491,6 +507,31 @@ public final class JSONLTailer: @unchecked Sendable {
             return
         }
 
+        // Claude records a transcript-only task id when Bash moves a command to
+        // the background. A Stop hook may follow while that shell is still live.
+        if lineData.range(of: backgroundTaskIdMarker) != nil,
+           let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+           let toolUseResult = json["toolUseResult"] as? [String: Any],
+           let taskId = nonEmptyString(toolUseResult["backgroundTaskId"]) {
+            appendUnique(taskId, to: &delta.startedBackgroundTaskIds)
+            delta.hasActivity = true
+            return
+        }
+
+        // Completion arrives as <task-notification>, not through hooks. Claude
+        // may serialize the same notification in several transcript row shapes;
+        // de-duplicate it and never expose this system XML as a user prompt.
+        if lineData.range(of: taskNotificationMarker) != nil,
+           let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+           let notification = taskNotificationText(in: json),
+           let taskId = xmlValue(named: "task-id", in: notification),
+           let status = xmlValue(named: "status", in: notification)?.lowercased(),
+           terminalBackgroundTaskStatuses.contains(status) {
+            appendUnique(taskId, to: &delta.finishedBackgroundTaskIds)
+            delta.hasActivity = true
+            return
+        }
+
         // Fast path: realistic Claude transcripts are ~75% tool_use / tool_result /
         // meta rows we don't care about. Skipping the JSON parse for those saves a
         // measurable chunk of CPU per byte during streaming bursts.
@@ -549,6 +590,47 @@ public final class JSONLTailer: @unchecked Sendable {
                 applyCursorRoleLine(role: role, message: message, into: &delta)
             }
         }
+    }
+
+    private static func appendUnique(_ value: String, to values: inout [String]) {
+        if !values.contains(value) {
+            values.append(value)
+        }
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let value = value as? String else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func taskNotificationText(in json: [String: Any]) -> String? {
+        if let content = json["content"] as? String, content.contains("<task-notification>") {
+            return content
+        }
+        if let message = json["message"] as? [String: Any],
+           let content = message["content"] as? String,
+           content.contains("<task-notification>") {
+            return content
+        }
+        if let attachment = json["attachment"] as? [String: Any],
+           let prompt = attachment["prompt"] as? String,
+           prompt.contains("<task-notification>") {
+            return prompt
+        }
+        return nil
+    }
+
+    private static func xmlValue(named name: String, in text: String) -> String? {
+        let opening = "<\(name)>"
+        let closing = "</\(name)>"
+        guard let start = text.range(of: opening),
+              let end = text.range(of: closing, range: start.upperBound..<text.endIndex) else {
+            return nil
+        }
+        let value = text[start.upperBound..<end.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 
     /// Handle one Cursor `role`-keyed transcript entry.
@@ -765,6 +847,11 @@ public final class JSONLTailer: @unchecked Sendable {
     private static let assistantBytes: [UInt8] = Array(#"assistant""#.utf8)
     private static let codexTurnContextMarker = Data(#""turn_context""#.utf8)
     private static let codexTokenCountMarker = Data(#""token_count""#.utf8)
+    private static let backgroundTaskIdMarker = Data(#""backgroundTaskId""#.utf8)
+    private static let taskNotificationMarker = Data("<task-notification>".utf8)
+    private static let terminalBackgroundTaskStatuses: Set<String> = [
+        "completed", "failed", "cancelled", "canceled", "killed", "terminated",
+    ]
     private static let userInputBytes: [UInt8] = Array(#"USER_INPUT""#.utf8)
     private static let plannerResponseBytes: [UInt8] = Array(#"PLANNER_RESPONSE""#.utf8)
 

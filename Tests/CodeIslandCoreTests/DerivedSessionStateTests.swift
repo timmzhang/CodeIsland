@@ -148,6 +148,28 @@ final class DerivedSessionStateTests: XCTestCase {
         XCTAssertFalse(effects.contains(.enqueueCompletion(sessionId: "cli-session")))
     }
 
+    func testClaudeStopKeepsSessionRunningWhileBackgroundShellIsActive() throws {
+        var session = SessionSnapshot()
+        session.source = "claude"
+        session.status = .processing
+        session.activeBackgroundTaskIds = ["bg-123"]
+
+        var sessions = ["claude-session": session]
+        let event = try decode([
+            "hook_event_name": "Stop",
+            "session_id": "claude-session",
+            "_source": "claude",
+        ])
+
+        let effects = reduceEvent(sessions: &sessions, event: event, maxHistory: 10)
+
+        XCTAssertEqual(sessions["claude-session"]?.status, .running)
+        XCTAssertEqual(sessions["claude-session"]?.currentTool, "Bash")
+        XCTAssertEqual(sessions["claude-session"]?.toolDescription, "Background shell")
+        XCTAssertEqual(sessions["claude-session"]?.isWaitingForBackgroundTasks, true)
+        XCTAssertFalse(effects.contains(.enqueueCompletion(sessionId: "claude-session")))
+    }
+
     func testCLIProcessResolverPrefersTraecliBinaryOverShellParent() {
         let pid = CLIProcessResolver.resolvedTrackedPID(
             immediateParentPID: 100,
