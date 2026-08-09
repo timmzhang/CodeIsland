@@ -49,6 +49,21 @@ extension AppState {
             sessions[sessionId] = session
         }
 
+        // Claude's hook channel has no background-shell lifecycle. Recover the
+        // current queue from the existing transcript before attaching at EOF so
+        // an app restart cannot briefly show a live background shell as finished.
+        if source == "claude", var session = sessions[sessionId] {
+            let taskIds = Self.latestClaudeBackgroundTaskIds(path: path)
+            session.activeBackgroundTaskIds = taskIds
+            if !taskIds.isEmpty, session.status == .idle {
+                session.status = .running
+                session.currentTool = "Bash"
+                session.toolDescription = "Background shell"
+                session.isWaitingForBackgroundTasks = true
+            }
+            sessions[sessionId] = session
+        }
+
         if sessions[sessionId]?.source == "codex",
            let turnStatus = Self.latestCodexTurnStatus(path: path),
            var session = sessions[sessionId] {
@@ -211,6 +226,54 @@ extension AppState {
         return latestStatus
     }
 
+    /// Reconstruct Claude's currently live background Bash queue from a transcript.
+    /// The scan is chunked so even long-lived sessions stay bounded in memory.
+    nonisolated static func latestClaudeBackgroundTaskIds(path: String) -> Set<String> {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return [] }
+        defer { handle.closeFile() }
+
+        handle.seek(toFileOffset: 0)
+        let chunkSize = 64 * 1024
+        var pendingFragment = Data()
+        var activeTaskIds: Set<String> = []
+
+        while true {
+            let chunk = handle.readData(ofLength: chunkSize)
+            if chunk.isEmpty { break }
+
+            let result = JSONLTailer.scanLines(pendingFragment + chunk)
+            pendingFragment = result.trailingFragment
+            activeTaskIds.formUnion(result.delta.startedBackgroundTaskIds)
+            activeTaskIds.subtract(result.delta.finishedBackgroundTaskIds)
+        }
+
+        return activeTaskIds
+    }
+
+    /// Lightweight Stop-boundary recovery for the file-watch race. A newly
+    /// backgrounded Bash result is adjacent to the Stop hook, so only the tail
+    /// is needed; already-known long-running tasks live in SessionSnapshot.
+    nonisolated static func recentClaudeBackgroundTaskIds(
+        path: String,
+        maxBytes: UInt64 = 512 * 1024
+    ) -> Set<String> {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return [] }
+        defer { handle.closeFile() }
+
+        let fileSize = handle.seekToEndOfFile()
+        let startOffset = fileSize > maxBytes ? fileSize - maxBytes : 0
+        handle.seek(toFileOffset: startOffset)
+        var data = handle.readDataToEndOfFile()
+        if startOffset > 0, let firstNewline = data.firstIndex(of: 0x0A) {
+            data = Data(data[data.index(after: firstNewline)...])
+        }
+
+        let result = JSONLTailer.scanLines(data)
+        var activeTaskIds = Set(result.delta.startedBackgroundTaskIds)
+        activeTaskIds.subtract(result.delta.finishedBackgroundTaskIds)
+        return activeTaskIds
+    }
+
     /// Stop watching a session's transcript. Called when the session is removed or
     /// when a new transcript path supersedes an older one.
     func detachTranscriptTailer(sessionId: String) {
@@ -240,6 +303,39 @@ extension AppState {
 
         guard var session = sessions[delta.sessionId] else { return }
         var mutated = false
+        var backgroundStateChanged = false
+
+        if !delta.startedBackgroundTaskIds.isEmpty || !delta.finishedBackgroundTaskIds.isEmpty {
+            let previousTaskIds = session.activeBackgroundTaskIds
+            session.activeBackgroundTaskIds.formUnion(delta.startedBackgroundTaskIds)
+            session.activeBackgroundTaskIds.subtract(delta.finishedBackgroundTaskIds)
+            backgroundStateChanged = session.activeBackgroundTaskIds != previousTaskIds
+
+            if !session.activeBackgroundTaskIds.isEmpty, session.status == .idle {
+                // The Stop hook won the race with the transcript file extension.
+                // Restore the state immediately instead of waiting for a later hook.
+                session.status = .running
+                session.currentTool = "Bash"
+                session.toolDescription = "Background shell"
+                session.isWaitingForBackgroundTasks = true
+                backgroundStateChanged = true
+            } else if session.activeBackgroundTaskIds.isEmpty,
+                      session.isWaitingForBackgroundTasks {
+                session.isWaitingForBackgroundTasks = false
+                let isWaitingForUser = session.status == .waitingApproval
+                    || session.status == .waitingQuestion
+                if !isWaitingForUser,
+                   !session.subagents.values.contains(where: { $0.status != .idle }) {
+                    // Claude consumes the completion notification as a system-origin
+                    // prompt, so the next accurate state is processing until Stop.
+                    session.status = .processing
+                    session.currentTool = nil
+                    session.toolDescription = nil
+                }
+                backgroundStateChanged = true
+            }
+            mutated = mutated || backgroundStateChanged
+        }
 
         if delta.hasActivity {
             session.lastActivity = Date()
@@ -318,9 +414,10 @@ extension AppState {
             session.lastActivity = Date()
             sessions[delta.sessionId] = session
         }
-        if questionStateChanged {
+        if questionStateChanged || backgroundStateChanged {
             // Hooks stay silent while Cursor waits on its question, so nothing
             // else recomputes the aggregated pill/mascot state for this flip.
+            // Claude background task transcript updates have the same property.
             refreshDerivedState()
         }
     }

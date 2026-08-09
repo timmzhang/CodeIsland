@@ -988,6 +988,12 @@ final class AppState {
     }
 
     private func enqueueCompletion(_ sessionId: String) {
+        // A Stop hook can enqueue this effect just before the transcript tailer
+        // reconstructs an older background task outside the lightweight tail scan.
+        // Re-check current state at execution time so that race cannot pop a
+        // completion card for a session that is still running.
+        guard sessions[sessionId]?.activeBackgroundTaskIds.isEmpty != false else { return }
+
         switch Self.completionStyle() {
         case .off:
             // Panel stays compact — status indicators still update, but no
@@ -1257,6 +1263,26 @@ final class AppState {
         }
 
         let normalizedEventName = EventNormalizer.normalize(event.eventName)
+
+        // The transcript file write and Stop hook arrive on independent queues.
+        // If Stop wins, synchronously inspect only the recent Claude transcript
+        // tail so reduceEvent sees the background shell before deciding whether
+        // to enqueue a false completion. The normal tailer remains authoritative
+        // for subsequent completion notifications.
+        let eventSource = SessionSnapshot.normalizedSupportedSource(
+            (event.rawJSON["_source"] as? String) ?? sessions[sessionId]?.source
+        )
+        if normalizedEventName == "Stop",
+           eventSource == "claude",
+           sessions[sessionId]?.activeBackgroundTaskIds.isEmpty ?? true,
+           let transcriptPath = (event.rawJSON["transcript_path"] as? String)
+                ?? sessions[sessionId]?.transcriptPath {
+            let recentTaskIds = Self.recentClaudeBackgroundTaskIds(path: transcriptPath)
+            if !recentTaskIds.isEmpty {
+                sessions[sessionId]?.activeBackgroundTaskIds = recentTaskIds
+            }
+        }
+
         let prevStatus = sessions[sessionId]?.status
         let wasWaiting = prevStatus == .waitingApproval || prevStatus == .waitingQuestion
         let cwdBeforeReduce = sessions[sessionId]?.cwd
@@ -1273,11 +1299,14 @@ final class AppState {
 
         let effects = reduceEvent(sessions: &sessions, event: event, maxHistory: maxHistory)
 
-        // Codex hooks carry the transcript path but not token counts. Attach
+        // Codex hooks carry the transcript path but not token counts; Claude's
+        // transcript is the only source of background-shell lifecycle. Attach
         // before SessionEnd removes the session, then force an offset flush at
-        // turn/session boundaries; normal file extension events remain the
-        // primary real-time delivery path.
-        if event.rawJSON["_source"] as? String == "codex",
+        // turn/session boundaries. Normal file events remain the primary path.
+        let transcriptBoundarySource = SessionSnapshot.normalizedSupportedSource(
+            sessions[sessionId]?.source ?? (event.rawJSON["_source"] as? String)
+        )
+        if transcriptBoundarySource == "codex" || transcriptBoundarySource == "claude",
            normalizedEventName == "Stop" || normalizedEventName == "SessionEnd" {
             attachTranscriptTailerIfNeeded(sessionId: sessionId)
             transcriptTailer.flush(sessionId: sessionId)
