@@ -12,7 +12,7 @@ import CodeIslandCore
 ///
 /// Supported tab-level detection:
 /// - iTerm2: session ID match
-/// - Ghostty: CWD match via System Events window title
+/// - Ghostty: focused terminal match via native AppleScript title/CWD
 /// - Terminal.app: TTY match on selected tab
 /// - WezTerm: CLI pane query by TTY/CWD
 /// - Kaku: same shape as WezTerm (it's a fork)
@@ -225,23 +225,28 @@ struct TerminalVisibilityDetector {
 
     // MARK: - Ghostty
 
-    /// Check if Ghostty's front window matches this session's CWD.
-    /// Uses System Events to read the front window title (Ghostty's native scripting
-    /// doesn't expose a "focused terminal" property).
+    /// Check if Ghostty's selected tab matches this session. Ghostty 1.3 exposes the
+    /// focused terminal directly, so use the same task-title/CWD signals as activation.
     private static func isGhosttyTabActive(_ session: SessionSnapshot) -> Bool {
         guard let cwd = session.cwd, !cwd.isEmpty else { return false }
-        let dirName = escapeAppleScript((cwd as NSString).lastPathComponent)
-        // Also require the session's source keyword in the title to reduce false positives
-        // when multiple CLI tools run in the same project directory
-        let sourceKeyword = escapeAppleScript(session.source)
+        let resolvedCwd = URL(fileURLWithPath: cwd).resolvingSymlinksInPath().path
+        let escapedCwd = escapeAppleScript(cwd)
+        let escapedResolvedCwd = escapeAppleScript(resolvedCwd)
+        let titleChecks = TerminalActivator.ghosttyTitleMatchKeys(
+            sessionTitle: session.sessionTitle,
+            cwd: cwd
+        ).map {
+            "if termTitle contains \"\(escapeAppleScript($0))\" then return \"true\""
+        }.joined(separator: "\n")
         let script = """
-        tell application "System Events"
-            tell process "Ghostty"
-                try
-                    set winTitle to name of front window
-                    if winTitle contains "\(dirName)" and winTitle contains "\(sourceKeyword)" then return "true"
-                end try
-            end tell
+        tell application "Ghostty"
+            try
+                set activeTerminal to focused terminal of selected tab of front window
+                set termTitle to name of activeTerminal as text
+                \(titleChecks)
+                set termCwd to working directory of activeTerminal as text
+                if termCwd is "\(escapedCwd)" or termCwd is "\(escapedResolvedCwd)" then return "true"
+            end try
         end tell
         return "false"
         """

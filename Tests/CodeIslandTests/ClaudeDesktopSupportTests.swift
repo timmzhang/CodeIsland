@@ -55,6 +55,26 @@ final class ClaudeDesktopSupportTests: XCTestCase {
         )
     }
 
+    func testGhosttyRoutingDerivesPinsTaskIdFromManagedTitleAndWorktree() {
+        XCTAssertEqual(
+            TerminalActivator.ghosttyTitleMatchKeys(
+                sessionTitle: "⏳ 任务库 Git 同步方案升级（p-nbw6）",
+                cwd: "/Users/test/.agents/skills/pins_p-nbw6"
+            ),
+            ["⏳ 任务库 Git 同步方案升级（p-nbw6）", "p-nbw6"]
+        )
+    }
+
+    func testGhosttyRoutingFallsBackToTaskIdEmbeddedInWorktree() {
+        XCTAssertEqual(
+            TerminalActivator.ghosttyTitleMatchKeys(
+                sessionTitle: nil,
+                cwd: "/Users/test/Workspace/CodeIsland_p-3q1u"
+            ),
+            ["p-3q1u"]
+        )
+    }
+
     func testNativeAppBundleRegistryInitializesAndRecognizesClaudeDesktop() {
         // Accessing the registry is the regression: duplicate dictionary keys trap
         // during static initialization before any click-to-jump routing can run.

@@ -276,6 +276,7 @@ struct TerminalActivator {
                 cwd: session.cwd,
                 tty: effectiveTty,
                 sessionId: sessionId,
+                sessionTitle: session.sessionTitle,
                 source: session.source,
                 tmuxPane: session.tmuxPane,
                 tmuxEnv: session.tmuxEnv
@@ -372,6 +373,7 @@ struct TerminalActivator {
         cwd: String?,
         tty: String? = nil,
         sessionId: String? = nil,
+        sessionTitle: String? = nil,
         source: String = "claude",
         tmuxPane: String? = nil,
         tmuxEnv: String? = nil
@@ -451,12 +453,17 @@ struct TerminalActivator {
         let escapedTilde = escapeAppleScript(tildeCwd)
         let escapedTmux = escapeAppleScript(tmuxKey)
         let escapedTmuxSession = escapeAppleScript(tmuxSession)
+        let escapedTitleKeys = ghosttyTitleMatchKeys(sessionTitle: sessionTitle, cwd: cwd1)
+            .map { "\"\(escapeAppleScript($0))\"" }
+            .joined(separator: ", ")
 
         // Match order:
         // 1) tmux title prefix (when available)
-        // 2) session ID in title (disambiguates same-CWD sessions)
-        // 3) source keyword in title ("claude"/"codex"/...)
-        // 4) CWD match (working directory), then title-based fallback
+        // 2) managed task/thread title (disambiguates tabs even when Ghostty's
+        //    working-directory property is unavailable or formatted differently)
+        // 3) session ID in title (legacy/custom terminal-title setups)
+        // 4) source keyword in title ("claude"/"codex"/...)
+        // 5) CWD match (working directory), then title-based fallback
         let idFilter: String
         if let sid = sessionId, !sid.isEmpty {
             let escapedSid = escapeAppleScript(String(sid.prefix(8)))
@@ -508,7 +515,26 @@ struct TerminalActivator {
                 end repeat
             end if
 
-            -- 2) TTY: Ghostty does not currently expose a `tty` property (only uuid,
+            -- 2) Pins/Codex managed titles contain the task id (for example p-nbw6).
+            -- Search all terminals before relying on working-directory equality: Ghostty's
+            -- shell integration can report a different path representation, and the visible
+            -- task title intentionally no longer contains the generic "codex" source word.
+            set titleKeys to {\(escapedTitleKeys)}
+            repeat with titleKey in titleKeys
+                if (titleKey as text) is not "" then
+                    repeat with t in allTerms
+                        try
+                            if name of t contains (titleKey as text) then
+                                focus t
+                                activate
+                                return
+                            end if
+                        end try
+                    end repeat
+                end if
+            end repeat
+
+            -- 3) TTY: Ghostty does not currently expose a `tty` property (only uuid,
             -- title, working directory). This block is kept for future-proofing and
             -- silently skips via try if the property doesn't exist.
             \(tty.map { t in
@@ -527,7 +553,7 @@ struct TerminalActivator {
                 """
             } ?? "")
 
-            -- 3) CWD: exact match on Ghostty's working directory property
+            -- 4) CWD: exact match on Ghostty's working directory property
             set matches to {}
             set cwd1 to "\(escapedCwd1)"
             set cwd2 to "\(escapedCwd2)"
@@ -542,7 +568,7 @@ struct TerminalActivator {
                 end try
             end if
 
-            -- 4) Fallback: match by title when Ghostty can't report the true working directory (common in tmux)
+            -- 5) Fallback: match by title when Ghostty can't report the true working directory (common in tmux)
             if (count of matches) = 0 then
                 set dirName to "\(escapedDir)"
                 set tildeCwd to "\(escapedTilde)"
@@ -596,6 +622,30 @@ struct TerminalActivator {
         // _Sync variant to skip an extra dispatch hop.
         runOsaScriptSync(script)
         } // end DispatchQueue.global async
+    }
+
+    /// Stable title fragments for Ghostty tab routing. Pins-managed Codex titles include
+    /// a task id while the CWD uses a repository-specific prefix, so derive the same id
+    /// from either source and keep the full thread title as the most specific match.
+    static func ghosttyTitleMatchKeys(sessionTitle: String?, cwd: String?) -> [String] {
+        var keys: [String] = []
+        if let title = sessionTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !title.isEmpty {
+            keys.append(title)
+        }
+
+        let candidates = [sessionTitle, cwd]
+        let pattern = #"p-[a-z0-9]+"#
+        if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+            for candidate in candidates.compactMap({ $0 }) {
+                let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
+                guard let match = regex.firstMatch(in: candidate, range: range),
+                      let swiftRange = Range(match.range, in: candidate) else { continue }
+                let taskId = String(candidate[swiftRange]).lowercased()
+                if !keys.contains(taskId) { keys.append(taskId) }
+            }
+        }
+        return keys
     }
 
     // MARK: - iTerm2 (AppleScript: match by session ID, tty, or cwd)
