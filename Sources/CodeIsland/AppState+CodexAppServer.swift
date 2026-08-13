@@ -349,10 +349,76 @@ extension AppState {
         let sessionId = AppState.codexAppSessionPrefix + threadId
         guard var snapshot = sessions[sessionId] else { return }
 
+        let wasWaitingOnApproval = snapshot.status == .waitingApproval
         applyCodexThreadStatus(&snapshot, status: params["status"]?.asObject)
         snapshot.lastActivity = Date()
         sessions[sessionId] = snapshot
+
+        // The thread just left `waitingOnApproval`, i.e. Codex already got its answer
+        // — from its own TUI, or from anywhere that isn't our card. Whatever card we
+        // are still showing for this thread is stale; release it now instead of
+        // waiting for the next hook event (which only arrives once the approved tool
+        // has finished running).
+        if wasWaitingOnApproval, snapshot.status != .waitingApproval {
+            resolveCodexPermissionsResolvedElsewhere(threadId: threadId)
+        }
         refreshDerivedState()
+    }
+
+    /// Drop permission cards for a Codex thread that resolved its approval elsewhere.
+    ///
+    /// The parked waiter is a blocking hook connection, so it must be released or the
+    /// bridge hangs. It is released with an EMPTY hook response (`{}`) — "no opinion"
+    /// — rather than allow/deny: `thread/status/changed` tells us the approval is over
+    /// but not which way the user answered, and asserting a decision here could
+    /// contradict the real one if Codex still reads the response.
+    func resolveCodexPermissionsResolvedElsewhere(threadId: String) {
+        let staleIndices = permissionQueueIndices(forCodexThread: threadId)
+        guard !staleIndices.isEmpty else { return }
+
+        let headWasStale = staleIndices.contains(0)
+        let noDecision = Data("{}".utf8)
+        var affectedSessionIds: Set<String> = [AppState.codexAppSessionPrefix + threadId]
+
+        // Remove back-to-front so the earlier indices stay valid.
+        for index in staleIndices.sorted(by: >) {
+            let stale = permissionQueue.remove(at: index)
+            affectedSessionIds.insert(stale.event.sessionId ?? "default")
+            stale.continuation.resume(returning: noDecision)
+        }
+
+        for affected in affectedSessionIds where sessions[affected]?.status == .waitingApproval {
+            sessions[affected]?.status = .processing
+            sessions[affected]?.currentTool = nil
+            sessions[affected]?.toolDescription = nil
+        }
+
+        if headWasStale {
+            if permissionQueue.isEmpty {
+                if case .approvalCard = surface {
+                    surface = .collapsed
+                }
+            } else {
+                showNextPending()
+            }
+        }
+    }
+
+    /// Queue positions belonging to one Codex app-server thread.
+    ///
+    /// Hook-delivered permissions arrive keyed by the provider session id (the raw
+    /// thread id), while app-server sessions are tracked under `codexapp:<threadId>`,
+    /// so both spellings — plus any tracked session pointing at that provider id —
+    /// have to be accepted.
+    private func permissionQueueIndices(forCodexThread threadId: String) -> [Int] {
+        let appSessionId = AppState.codexAppSessionPrefix + threadId
+        return permissionQueue.indices.filter { index in
+            let requestSessionId = permissionQueue[index].event.sessionId ?? "default"
+            if requestSessionId == threadId || requestSessionId == appSessionId {
+                return true
+            }
+            return sessions[requestSessionId]?.providerSessionId == threadId
+        }
     }
 
     private func applyCodexThreadClosedNotification(params: [String: AnyCodableLike]) {

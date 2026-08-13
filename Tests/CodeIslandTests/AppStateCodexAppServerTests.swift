@@ -211,6 +211,151 @@ final class AppStateCodexAppServerTests: XCTestCase {
         XCTAssertEqual(snapshot.status, .waitingApproval)
     }
 
+    // MARK: - Approval answered in Codex's own UI
+
+    /// The user answered the approval in Codex itself, so the thread leaves
+    /// `waitingOnApproval`. That notification is the ONLY timely signal we get — the
+    /// hook channel stays silent until the approved tool finishes — so the mirror card
+    /// has to be released right here instead of lingering for the rest of the turn.
+    func testThreadLeavingWaitingOnApprovalDismissesMirrorCard() async throws {
+        let appState = AppState()
+        appState.handleCodexAppServerMessage(makeThreadStarted(threadId: "t-1", waitingOnApproval: true))
+        XCTAssertEqual(appState.sessions["codexapp:t-1"]?.status, .waitingApproval)
+
+        let responseTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(
+                    try! self.makeCodexPermissionEvent(sessionId: "t-1"),
+                    continuation: cont
+                )
+            }
+        }
+        await Task.yield()
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+
+        appState.handleCodexAppServerMessage(makeStatusChanged(threadId: "t-1", waitingOnApproval: false))
+
+        // Released with an empty hook response: the status flag says the approval is
+        // over but not which way it went, so we must not assert allow or deny.
+        let response = await responseTask.value
+        XCTAssertEqual(String(data: response, encoding: .utf8), "{}")
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+        XCTAssertEqual(appState.sessions["codexapp:t-1"]?.status, .processing)
+        if case .approvalCard = appState.surface {
+            XCTFail("stale approval card should have collapsed")
+        }
+    }
+
+    /// A status notification that was never preceded by `waitingOnApproval` says
+    /// nothing about our card — a live prompt must survive it.
+    func testStatusChangeWithoutPriorApprovalWaitKeepsCard() async throws {
+        let appState = AppState()
+        appState.handleCodexAppServerMessage(makeThreadStarted(threadId: "t-2", waitingOnApproval: false))
+
+        let responseTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(
+                    try! self.makeCodexPermissionEvent(sessionId: "t-2"),
+                    continuation: cont
+                )
+            }
+        }
+        await Task.yield()
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+
+        appState.handleCodexAppServerMessage(makeStatusChanged(threadId: "t-2", waitingOnApproval: false))
+
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        responseTask.cancel()
+        appState.denyPermission()
+        _ = await responseTask.value
+    }
+
+    /// Threads are independent: resolving one must not drain another's card.
+    func testApprovalResolvedOnOneThreadLeavesOtherThreadsCard() async throws {
+        let appState = AppState()
+        appState.handleCodexAppServerMessage(makeThreadStarted(threadId: "t-a", waitingOnApproval: true))
+        appState.handleCodexAppServerMessage(makeThreadStarted(threadId: "t-b", waitingOnApproval: true))
+
+        let taskA = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(
+                    try! self.makeCodexPermissionEvent(sessionId: "t-a"),
+                    continuation: cont
+                )
+            }
+        }
+        await Task.yield()
+        let taskB = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(
+                    try! self.makeCodexPermissionEvent(sessionId: "t-b"),
+                    continuation: cont
+                )
+            }
+        }
+        await Task.yield()
+        XCTAssertEqual(appState.permissionQueue.count, 2)
+
+        appState.handleCodexAppServerMessage(makeStatusChanged(threadId: "t-a", waitingOnApproval: false))
+
+        let responseA = await taskA.value
+        XCTAssertEqual(String(data: responseA, encoding: .utf8), "{}")
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        XCTAssertEqual(appState.permissionQueue.first?.event.sessionId, "t-b")
+
+        appState.handleCodexAppServerMessage(makeStatusChanged(threadId: "t-b", waitingOnApproval: false))
+        let responseB = await taskB.value
+        XCTAssertEqual(String(data: responseB, encoding: .utf8), "{}")
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+    }
+
+    private func makeCodexPermissionEvent(sessionId: String) throws -> HookEvent {
+        let payload: [String: Any] = [
+            "hook_event_name": "PermissionRequest",
+            "session_id": sessionId,
+            "tool_name": "Bash",
+            "tool_input": ["command": "echo hi"],
+            "_source": "codex",
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        return try XCTUnwrap(HookEvent(from: data))
+    }
+
+    private func makeThreadStarted(threadId: String, waitingOnApproval: Bool) -> CodexJSONRPCMessage {
+        makeNotification(method: "thread/started", params: [
+            "thread": [
+                "id": threadId,
+                "cwd": "/Users/haoo/Documents/project",
+                "status": statusPayload(waitingOnApproval: waitingOnApproval),
+            ],
+        ])
+    }
+
+    private func makeStatusChanged(threadId: String, waitingOnApproval: Bool) -> CodexJSONRPCMessage {
+        makeNotification(method: "thread/status/changed", params: [
+            "threadId": threadId,
+            "status": statusPayload(waitingOnApproval: waitingOnApproval),
+        ])
+    }
+
+    private func statusPayload(waitingOnApproval: Bool) -> [String: Any] {
+        [
+            "type": "active",
+            "activeFlags": waitingOnApproval ? ["waitingOnApproval"] : [],
+        ]
+    }
+
+    private func makeNotification(method: String, params: [String: Any]) -> CodexJSONRPCMessage {
+        let body: [String: Any] = [
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: body)
+        return CodexAppServerClient.parseMessage(data)!
+    }
+
     private func makeExecutable(at url: URL) throws {
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
