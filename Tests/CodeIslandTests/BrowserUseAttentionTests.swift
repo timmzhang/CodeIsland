@@ -72,7 +72,7 @@ final class BrowserUseAttentionTests: XCTestCase {
         let pre = try makeEvent(
             name: "PreToolUse",
             toolUseId: "exec-browser-3",
-            code: "await browser.user.openTabs()"
+            code: #"await browser.tabs.new(); await tab.goto("https://example.com/a");"#
         )
         state.cachePreToolUseIfApplicable(pre)
         state.updateBrowserUseAttention(for: pre, delayNanoseconds: 20_000_000, playSound: false)
@@ -92,7 +92,7 @@ final class BrowserUseAttentionTests: XCTestCase {
         let pre = try makeEvent(
             name: "PreToolUse",
             toolUseId: "exec-browser-visible-stop",
-            code: "await browser.tabs.list()"
+            code: #"await browser.tabs.new(); await tab.goto("https://example.com/b");"#
         )
         state.cachePreToolUseIfApplicable(pre)
         state.updateBrowserUseAttention(for: pre, delayNanoseconds: 0, playSound: false)
@@ -174,21 +174,39 @@ final class BrowserUseAttentionTests: XCTestCase {
             """)
         }
 
-        let settled = BrowserUseAttention(
-            toolUseId: "a", sessionId: "s1", target: "http://127.0.0.1:5195/x", detectedAt: Date()
-        )
-        let undecided = BrowserUseAttention(
-            toolUseId: "b", sessionId: "s1", target: "http://127.0.0.1:9999/x", detectedAt: Date()
-        )
-        let unresolved = BrowserUseAttention(
-            toolUseId: "c", sessionId: "s1", target: nil, detectedAt: Date()
-        )
+        func attention(_ id: String, _ navigation: BrowserUseNavigation) -> BrowserUseAttention {
+            var url: String?
+            if case .direct(let value) = navigation { url = value }
+            return BrowserUseAttention(
+                toolUseId: id,
+                sessionId: "s1",
+                target: url,
+                detectedAt: Date(),
+                navigation: navigation
+            )
+        }
 
-        XCTAssertEqual(state.browserUseAttentionTrigger(for: settled), .settledOrigin)
-        XCTAssertEqual(state.browserUseAttentionTrigger(for: undecided), .undecidedOrigin)
-        XCTAssertEqual(state.browserUseAttentionTrigger(for: unresolved), .unresolvedOrigin)
+        XCTAssertEqual(
+            state.browserUseAttentionTrigger(
+                for: attention("a", .direct(url: "http://127.0.0.1:5195/x"))
+            ),
+            .settledOrigin
+        )
+        XCTAssertEqual(
+            state.browserUseAttentionTrigger(
+                for: attention("b", .direct(url: "http://127.0.0.1:9999/x"))
+            ),
+            .undecidedOrigin
+        )
+        XCTAssertEqual(
+            state.browserUseAttentionTrigger(for: attention("c", .direct(url: nil))),
+            .unresolvedOrigin
+        )
+        XCTAssertEqual(state.browserUseAttentionTrigger(for: attention("d", .indirect)), .indirectNavigation)
+        XCTAssertEqual(state.browserUseAttentionTrigger(for: attention("e", .none)), .noNavigation)
 
         XCTAssertNil(BrowserUseAttentionDetector.delayNanoseconds(for: .settledOrigin))
+        XCTAssertNil(BrowserUseAttentionDetector.delayNanoseconds(for: .noNavigation))
         XCTAssertEqual(
             BrowserUseAttentionDetector.delayNanoseconds(for: .undecidedOrigin),
             BrowserUseAttentionDetector.undecidedOriginDelayNanoseconds
@@ -197,6 +215,126 @@ final class BrowserUseAttentionTests: XCTestCase {
             BrowserUseAttentionDetector.delayNanoseconds(for: .unresolvedOrigin),
             BrowserUseAttentionDetector.unresolvedOriginDelayNanoseconds
         )
+        XCTAssertEqual(
+            BrowserUseAttentionDetector.delayNanoseconds(for: .indirectNavigation),
+            BrowserUseAttentionDetector.indirectNavigationDelayNanoseconds
+        )
+    }
+
+    // MARK: - Call shape
+
+    func testOnlyNavigatingCodeCanRaiseTheOriginPrompt() {
+        // The 2026-08-14 false alarm: a URL passed to fetch() inside the page, with
+        // nothing navigating anywhere.
+        let inPageFetch = BrowserUseCallShape.read("""
+        nodeRepl.write(await ticketTab.playwright.evaluate(async () => {
+          const res = await fetch("https://ti-platform.lark-us.net/api/v1/ticket/462/");
+          return res.status;
+        }));
+        """)
+        XCTAssertEqual(inPageFetch.navigation, .none)
+
+        XCTAssertEqual(
+            BrowserUseCallShape.read("nodeRepl.write(await bizTab.playwright.domSnapshot());").navigation,
+            .none
+        )
+        // A blank tab is not a destination; the goto that follows is.
+        XCTAssertEqual(
+            BrowserUseCallShape.read("globalThis.tab = await browser.tabs.new();").navigation,
+            .none
+        )
+        // reload/goBack revisit an origin the browser is already allowed to be on.
+        XCTAssertEqual(
+            BrowserUseCallShape.read("await bitsTab.reload(); await bitsTab.goBack();").navigation,
+            .none
+        )
+    }
+
+    func testNavigationShapeDistinguishesLiteralVariableAndClickDestinations() {
+        XCTAssertEqual(
+            BrowserUseCallShape.read(
+                #"globalThis.tab = await browser.tabs.new(); await tab.goto("http://127.0.0.1:5195/gmail-ops");"#
+            ).navigation,
+            .direct(url: "http://127.0.0.1:5195/gmail-ops")
+        )
+        XCTAssertEqual(
+            BrowserUseCallShape.read(#"await browser.tabs.new({ url: "https://example.com/x" });"#).navigation,
+            .direct(url: "https://example.com/x")
+        )
+        XCTAssertEqual(
+            BrowserUseCallShape.read("await tab.goto(dashboardUrl);").navigation,
+            .direct(url: nil)
+        )
+        XCTAssertEqual(
+            BrowserUseCallShape.read(
+                #"await bitsTab.playwright.getByRole('link',{name:/orca/}).click();"#
+            ).navigation,
+            .indirect
+        )
+    }
+
+    func testDeclaredWaitsAreSummedAndCapped() {
+        XCTAssertEqual(
+            BrowserUseCallShape.read(
+                "await new Promise(r=>setTimeout(r,28000)); await t.reload(); await t.playwright.waitForTimeout(3000);"
+            ).declaredWait,
+            31,
+            accuracy: 0.001
+        )
+        // Sub-100ms tweaks are noise, not a budget.
+        XCTAssertEqual(
+            BrowserUseCallShape.read("await t.playwright.waitForTimeout(50);").declaredWait,
+            0,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            BrowserUseCallShape.read("await t.playwright.waitForTimeout(600000);").declaredWait,
+            BrowserUseCallShape.maxDeclaredWait,
+            accuracy: 0.001
+        )
+    }
+
+    func testDeclaredWaitsExtendTheWeakTriggersOnly() {
+        XCTAssertEqual(
+            BrowserUseAttentionDetector.delayNanoseconds(for: .indirectNavigation, declaredWait: 28),
+            BrowserUseAttentionDetector.indirectNavigationDelayNanoseconds + 28_000_000_000
+        )
+        XCTAssertEqual(
+            BrowserUseAttentionDetector.delayNanoseconds(for: .unresolvedOrigin, declaredWait: 5),
+            BrowserUseAttentionDetector.unresolvedOriginDelayNanoseconds + 5_000_000_000
+        )
+        // A fresh origin in the source blocks the navigation up front, so waits the
+        // script schedules afterwards must not hold the card back.
+        XCTAssertEqual(
+            BrowserUseAttentionDetector.delayNanoseconds(for: .undecidedOrigin, declaredWait: 28),
+            BrowserUseAttentionDetector.undecidedOriginDelayNanoseconds
+        )
+    }
+
+    func testCallThatCannotNavigateNeverRaisesTheCard() async throws {
+        let state = AppState()
+        state.sessions["s1"] = codexSession()
+        state.browserUseOriginPolicyProvider = { _ in .empty }
+
+        let pre = try makeEvent(
+            name: "PreToolUse",
+            toolUseId: "exec-browser-in-page-fetch",
+            code: #"""
+            nodeRepl.write(await ticketTab.playwright.evaluate(async () => {
+              const res = await fetch("https://ti-platform.lark-us.net/api/v1/ticket/462/");
+              return res.status;
+            }));
+            """#
+        )
+        state.cachePreToolUseIfApplicable(pre)
+        // Even with the delay forced to zero — the suppression is about what the call
+        // can do, not about how long it takes.
+        state.updateBrowserUseAttention(for: pre, delayNanoseconds: 0, playSound: false)
+        try await Task.sleep(nanoseconds: 5_000_000)
+
+        XCTAssertNil(state.browserUseAttention)
+        XCTAssertTrue(state.browserUseAttentionDelayTasks.isEmpty)
+        XCTAssertEqual(state.surface, .collapsed)
     }
 
     func testAlreadyAllowedOriginNeverRaisesTheCard() async throws {

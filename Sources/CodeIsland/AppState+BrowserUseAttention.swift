@@ -9,19 +9,28 @@ struct BrowserUseAttention: Equatable {
     let sessionId: String
     let target: String?
     let detectedAt: Date
+    var navigation: BrowserUseNavigation = .direct(url: nil)
+    var declaredWait: TimeInterval = 0
 }
 
 /// Whether a pending Browser Use call can raise Codex's origin prompt, and how long
 /// to wait before assuming it did.
 enum BrowserUseAttentionTrigger: Equatable {
+    /// The code cannot move the browser anywhere, and Codex only asks about origins it
+    /// is about to visit. A snapshot or an `evaluate` that runs long is a slow page,
+    /// never a pending confirmation.
+    case noNavigation
     /// The origin is already allowed or already denied — Codex answers from its own
     /// records and never prompts, so a call that runs long is just running long.
     case settledOrigin
-    /// The call names an origin with no answer on record; a prompt is expected.
+    /// The call navigates to an origin with no answer on record; a prompt is expected.
     case undecidedOrigin
-    /// No URL in the code, so the origin can't be resolved ahead of the call. Only a
-    /// duration well past any normal browser call is evidence of anything.
+    /// A navigation whose destination comes from a variable, so the origin can't be
+    /// resolved ahead of the call. Only a duration well past a normal load says anything.
     case unresolvedOrigin
+    /// A click that might follow a link to another origin. It usually doesn't, so this
+    /// needs the longest run before it counts as evidence.
+    case indirectNavigation
 }
 
 enum BrowserUseAttentionDetector {
@@ -29,17 +38,27 @@ enum BrowserUseAttentionDetector {
     /// Long enough for a quick call to finish on its own, short enough that a real
     /// prompt is surfaced while the user is still looking at the screen.
     static let undecidedOriginDelayNanoseconds: UInt64 = 2_000_000_000
-    /// Measured against this user's own Codex rollouts: 1% of browser calls without a
-    /// URL run past 8s, versus 25% past 2s. A blocked call waits indefinitely, so
-    /// trading latency for silence costs nothing here.
+    /// The destination isn't in the source, so this leans on duration alone. Measured
+    /// against this user's own Codex rollouts, 1% of browser calls run past 8s.
     static let unresolvedOriginDelayNanoseconds: UInt64 = 10_000_000_000
+    /// Clicks navigate somewhere new only rarely, and the ones that run long are almost
+    /// always working through a slow page rather than waiting on anybody.
+    static let indirectNavigationDelayNanoseconds: UInt64 = 15_000_000_000
     static let attentionTimeoutNanoseconds: UInt64 = 120_000_000_000
 
-    static func delayNanoseconds(for trigger: BrowserUseAttentionTrigger) -> UInt64? {
+    /// `declaredWait` is added to the weaker triggers only. Where the evidence is a
+    /// fresh origin in the source, the prompt blocks the navigation immediately and the
+    /// card should not be held back by waits the script schedules afterwards.
+    static func delayNanoseconds(
+        for trigger: BrowserUseAttentionTrigger,
+        declaredWait: TimeInterval = 0
+    ) -> UInt64? {
+        let budget = UInt64(max(0, declaredWait) * 1_000_000_000)
         switch trigger {
-        case .settledOrigin: return nil
+        case .noNavigation, .settledOrigin: return nil
         case .undecidedOrigin: return undecidedOriginDelayNanoseconds
-        case .unresolvedOrigin: return unresolvedOriginDelayNanoseconds
+        case .unresolvedOrigin: return unresolvedOriginDelayNanoseconds + budget
+        case .indirectNavigation: return indirectNavigationDelayNanoseconds + budget
         }
     }
 
@@ -54,11 +73,17 @@ enum BrowserUseAttentionDetector {
             return nil
         }
 
+        let shape = BrowserUseCallShape.read(code)
+        var destination: String?
+        if case .direct(let url) = shape.navigation { destination = url }
+
         return BrowserUseAttention(
             toolUseId: toolUseId,
             sessionId: event.sessionId ?? "default",
-            target: firstURL(in: code),
-            detectedAt: now
+            target: destination,
+            detectedAt: now,
+            navigation: shape.navigation,
+            declaredWait: shape.declaredWait
         )
     }
 
@@ -96,17 +121,6 @@ enum BrowserUseAttentionDetector {
         }
         return nil
     }
-
-    private static func firstURL(in code: String) -> String? {
-        let pattern = #"https?://[^\s\"'\\)>\]]+"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(
-                in: code,
-                range: NSRange(code.startIndex..<code.endIndex, in: code)
-              ),
-              let range = Range(match.range, in: code) else { return nil }
-        return String(code[range])
-    }
 }
 
 extension AppState {
@@ -115,14 +129,22 @@ extension AppState {
     /// Reads `$CODEX_HOME/browser/…` through `browserUseOriginPolicyProvider`, keyed by
     /// the Codex thread id — session-scoped answers live in a per-thread file.
     func browserUseAttentionTrigger(for candidate: BrowserUseAttention) -> BrowserUseAttentionTrigger {
-        guard let target = candidate.target,
-              let origin = BrowserUseOriginPolicy.origin(ofURL: target) else {
-            return .unresolvedOrigin
-        }
-        let policy = browserUseOriginPolicyProvider(codexThreadId(forSessionId: candidate.sessionId))
-        switch policy.decision(forOrigin: origin) {
-        case .allowed, .denied: return .settledOrigin
-        case .unknown: return .undecidedOrigin
+        switch candidate.navigation {
+        case .none:
+            return .noNavigation
+        case .indirect:
+            return .indirectNavigation
+        case .direct(let url):
+            guard let url, let origin = BrowserUseOriginPolicy.origin(ofURL: url) else {
+                return .unresolvedOrigin
+            }
+            let policy = browserUseOriginPolicyProvider(
+                codexThreadId(forSessionId: candidate.sessionId)
+            )
+            switch policy.decision(forOrigin: origin) {
+            case .allowed, .denied: return .settledOrigin
+            case .unknown: return .undecidedOrigin
+            }
         }
     }
 
@@ -161,8 +183,14 @@ extension AppState {
 
         guard let candidate = BrowserUseAttentionDetector.candidate(for: event) else { return }
         let trigger = browserUseAttentionTrigger(for: candidate)
+        // A call that can't navigate can't be sitting on an origin prompt, whatever the
+        // caller asked for as a delay.
+        guard trigger != .noNavigation else { return }
         guard let resolvedDelay = delayNanoseconds
-                ?? BrowserUseAttentionDetector.delayNanoseconds(for: trigger) else { return }
+                ?? BrowserUseAttentionDetector.delayNanoseconds(
+                    for: trigger,
+                    declaredWait: candidate.declaredWait
+                ) else { return }
 
         browserUseAttentionDelayTasks[candidate.toolUseId]?.cancel()
         browserUseAttentionDelayTasks[candidate.toolUseId] = Task { @MainActor [weak self] in
