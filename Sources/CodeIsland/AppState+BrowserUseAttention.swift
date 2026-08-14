@@ -11,10 +11,37 @@ struct BrowserUseAttention: Equatable {
     let detectedAt: Date
 }
 
+/// Whether a pending Browser Use call can raise Codex's origin prompt, and how long
+/// to wait before assuming it did.
+enum BrowserUseAttentionTrigger: Equatable {
+    /// The origin is already allowed or already denied — Codex answers from its own
+    /// records and never prompts, so a call that runs long is just running long.
+    case settledOrigin
+    /// The call names an origin with no answer on record; a prompt is expected.
+    case undecidedOrigin
+    /// No URL in the code, so the origin can't be resolved ahead of the call. Only a
+    /// duration well past any normal browser call is evidence of anything.
+    case unresolvedOrigin
+}
+
 enum BrowserUseAttentionDetector {
     static let toolName = "mcp__node_repl__js"
-    static let attentionDelayNanoseconds: UInt64 = 2_000_000_000
+    /// Long enough for a quick call to finish on its own, short enough that a real
+    /// prompt is surfaced while the user is still looking at the screen.
+    static let undecidedOriginDelayNanoseconds: UInt64 = 2_000_000_000
+    /// Measured against this user's own Codex rollouts: 1% of browser calls without a
+    /// URL run past 8s, versus 25% past 2s. A blocked call waits indefinitely, so
+    /// trading latency for silence costs nothing here.
+    static let unresolvedOriginDelayNanoseconds: UInt64 = 10_000_000_000
     static let attentionTimeoutNanoseconds: UInt64 = 120_000_000_000
+
+    static func delayNanoseconds(for trigger: BrowserUseAttentionTrigger) -> UInt64? {
+        switch trigger {
+        case .settledOrigin: return nil
+        case .undecidedOrigin: return undecidedOriginDelayNanoseconds
+        case .unresolvedOrigin: return unresolvedOriginDelayNanoseconds
+        }
+    }
 
     static func candidate(for event: HookEvent, now: Date = Date()) -> BrowserUseAttention? {
         guard EventNormalizer.normalize(event.eventName) == "PreToolUse",
@@ -83,9 +110,37 @@ enum BrowserUseAttentionDetector {
 }
 
 extension AppState {
+    /// How Codex would answer this call's origin right now.
+    ///
+    /// Reads `$CODEX_HOME/browser/…` through `browserUseOriginPolicyProvider`, keyed by
+    /// the Codex thread id — session-scoped answers live in a per-thread file.
+    func browserUseAttentionTrigger(for candidate: BrowserUseAttention) -> BrowserUseAttentionTrigger {
+        guard let target = candidate.target,
+              let origin = BrowserUseOriginPolicy.origin(ofURL: target) else {
+            return .unresolvedOrigin
+        }
+        let policy = browserUseOriginPolicyProvider(codexThreadId(forSessionId: candidate.sessionId))
+        switch policy.decision(forOrigin: origin) {
+        case .allowed, .denied: return .settledOrigin
+        case .unknown: return .undecidedOrigin
+        }
+    }
+
+    /// Browser Use's per-session origin file is named by the Codex thread id, which is
+    /// what hook events carry directly and what `codexapp:` sessions wrap.
+    private func codexThreadId(forSessionId sessionId: String) -> String {
+        if let providerSessionId = sessions[sessionId]?.providerSessionId, !providerSessionId.isEmpty {
+            return providerSessionId
+        }
+        if sessionId.hasPrefix(AppState.codexAppSessionPrefix) {
+            return String(sessionId.dropFirst(AppState.codexAppSessionPrefix.count))
+        }
+        return sessionId
+    }
+
     func updateBrowserUseAttention(
         for event: HookEvent,
-        delayNanoseconds: UInt64 = BrowserUseAttentionDetector.attentionDelayNanoseconds,
+        delayNanoseconds: UInt64? = nil,
         playSound: Bool = true
     ) {
         let normalized = EventNormalizer.normalize(event.eventName)
@@ -105,14 +160,22 @@ extension AppState {
         }
 
         guard let candidate = BrowserUseAttentionDetector.candidate(for: event) else { return }
+        let trigger = browserUseAttentionTrigger(for: candidate)
+        guard let resolvedDelay = delayNanoseconds
+                ?? BrowserUseAttentionDetector.delayNanoseconds(for: trigger) else { return }
+
         browserUseAttentionDelayTasks[candidate.toolUseId]?.cancel()
         browserUseAttentionDelayTasks[candidate.toolUseId] = Task { @MainActor [weak self] in
-            if delayNanoseconds > 0 {
-                try? await Task.sleep(nanoseconds: delayNanoseconds)
+            if resolvedDelay > 0 {
+                try? await Task.sleep(nanoseconds: resolvedDelay)
             }
             guard !Task.isCancelled, let self else { return }
             self.browserUseAttentionDelayTasks.removeValue(forKey: candidate.toolUseId)
             guard self.pendingToolUses[candidate.toolUseId] != nil else { return }
+            // Re-read the origin files: the user may have answered "Allow" or "Always
+            // allow" while we were waiting, which settles the origin and means the
+            // prompt this card would point at is already gone.
+            guard self.browserUseAttentionTrigger(for: candidate) != .settledOrigin else { return }
             self.presentBrowserUseAttention(candidate, playSound: playSound)
         }
     }

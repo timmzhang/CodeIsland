@@ -41,6 +41,7 @@ final class BrowserUseAttentionTests: XCTestCase {
     func testAttentionAppearsAfterDelayAndPostToolUseClearsIt() async throws {
         let state = AppState()
         state.sessions["s1"] = codexSession()
+        state.browserUseOriginPolicyProvider = { _ in .empty }
         let pre = try makeEvent(
             name: "PreToolUse",
             toolUseId: "exec-browser-2",
@@ -67,6 +68,7 @@ final class BrowserUseAttentionTests: XCTestCase {
     func testStopCancelsCandidateBeforeItCanAppear() async throws {
         let state = AppState()
         state.sessions["s1"] = codexSession()
+        state.browserUseOriginPolicyProvider = { _ in .empty }
         let pre = try makeEvent(
             name: "PreToolUse",
             toolUseId: "exec-browser-3",
@@ -86,6 +88,7 @@ final class BrowserUseAttentionTests: XCTestCase {
     func testStopClearsVisibleAttentionAndItsCachedToolUse() async throws {
         let state = AppState()
         state.sessions["s1"] = codexSession()
+        state.browserUseOriginPolicyProvider = { _ in .empty }
         let pre = try makeEvent(
             name: "PreToolUse",
             toolUseId: "exec-browser-visible-stop",
@@ -110,6 +113,7 @@ final class BrowserUseAttentionTests: XCTestCase {
     func testTranscriptToolCallEndClearsVisibleAttentionWithoutPostToolUse() {
         let state = AppState()
         state.sessions["s1"] = codexSession()
+        state.browserUseOriginPolicyProvider = { _ in .empty }
         state.browserUseAttention = BrowserUseAttention(
             toolUseId: "exec-browser-4",
             sessionId: "s1",
@@ -135,6 +139,157 @@ final class BrowserUseAttentionTests: XCTestCase {
         XCTAssertNil(state.browserUseAttention)
         XCTAssertNil(state.pendingToolUses["exec-browser-4"])
         XCTAssertEqual(state.surface, .collapsed)
+    }
+
+    // MARK: - Origin policy
+
+    func testOriginPolicyParsesBothArrayShapesAndNormalizesPorts() {
+        let policy = BrowserUseOriginPolicy.parse("""
+        [origins]
+        allowed = [
+            "http://127.0.0.1:5195",
+            "https://tq.bytedance.net",  # trailing comment
+        ]
+        denied = ["http://localhost:48137/"]
+
+        [other]
+        allowed = ["http://not-origins.example"]
+        """)
+
+        XCTAssertEqual(policy.decision(forURL: "http://127.0.0.1:5195/gmail-ops?tab=list"), .allowed)
+        XCTAssertEqual(policy.decision(forURL: "https://tq.bytedance.net:443/x"), .allowed)
+        XCTAssertEqual(policy.decision(forURL: "http://localhost:48137/poc"), .denied)
+        XCTAssertEqual(policy.decision(forURL: "http://not-origins.example"), .unknown)
+        XCTAssertEqual(policy.decision(forURL: "http://127.0.0.1:5196/"), .unknown)
+        XCTAssertEqual(policy.decision(forURL: nil), .unknown)
+    }
+
+    func testTriggerClassificationDrivesTheDelay() throws {
+        let state = AppState()
+        state.sessions["s1"] = codexSession()
+        state.browserUseOriginPolicyProvider = { _ in
+            BrowserUseOriginPolicy.parse("""
+            [origins]
+            allowed = ["http://127.0.0.1:5195"]
+            """)
+        }
+
+        let settled = BrowserUseAttention(
+            toolUseId: "a", sessionId: "s1", target: "http://127.0.0.1:5195/x", detectedAt: Date()
+        )
+        let undecided = BrowserUseAttention(
+            toolUseId: "b", sessionId: "s1", target: "http://127.0.0.1:9999/x", detectedAt: Date()
+        )
+        let unresolved = BrowserUseAttention(
+            toolUseId: "c", sessionId: "s1", target: nil, detectedAt: Date()
+        )
+
+        XCTAssertEqual(state.browserUseAttentionTrigger(for: settled), .settledOrigin)
+        XCTAssertEqual(state.browserUseAttentionTrigger(for: undecided), .undecidedOrigin)
+        XCTAssertEqual(state.browserUseAttentionTrigger(for: unresolved), .unresolvedOrigin)
+
+        XCTAssertNil(BrowserUseAttentionDetector.delayNanoseconds(for: .settledOrigin))
+        XCTAssertEqual(
+            BrowserUseAttentionDetector.delayNanoseconds(for: .undecidedOrigin),
+            BrowserUseAttentionDetector.undecidedOriginDelayNanoseconds
+        )
+        XCTAssertEqual(
+            BrowserUseAttentionDetector.delayNanoseconds(for: .unresolvedOrigin),
+            BrowserUseAttentionDetector.unresolvedOriginDelayNanoseconds
+        )
+    }
+
+    func testAlreadyAllowedOriginNeverRaisesTheCard() async throws {
+        let state = AppState()
+        state.sessions["s1"] = codexSession()
+        state.browserUseOriginPolicyProvider = { threadId in
+            XCTAssertEqual(threadId, "s1")
+            return BrowserUseOriginPolicy.parse("""
+            [origins]
+            allowed = ["http://127.0.0.1:5195"]
+            """)
+        }
+
+        let pre = try makeEvent(
+            name: "PreToolUse",
+            toolUseId: "exec-browser-allowed",
+            code: #"globalThis.tab = await browser.tabs.new(); await tab.goto("http://127.0.0.1:5195/gmail-ops");"#
+        )
+        state.cachePreToolUseIfApplicable(pre)
+        state.updateBrowserUseAttention(for: pre, playSound: false)
+        try await Task.sleep(nanoseconds: 5_000_000)
+
+        XCTAssertNil(state.browserUseAttention)
+        XCTAssertTrue(state.browserUseAttentionDelayTasks.isEmpty)
+        XCTAssertEqual(state.surface, .collapsed)
+    }
+
+    func testDeniedOriginNeverRaisesTheCard() async throws {
+        let state = AppState()
+        state.sessions["s1"] = codexSession()
+        state.browserUseOriginPolicyProvider = { _ in
+            BrowserUseOriginPolicy.parse("""
+            [origins]
+            denied = ["http://127.0.0.1:48137"]
+            """)
+        }
+
+        let pre = try makeEvent(
+            name: "PreToolUse",
+            toolUseId: "exec-browser-denied",
+            code: #"await agent.browsers.getForUrl("http://127.0.0.1:48137/poc");"#
+        )
+        state.cachePreToolUseIfApplicable(pre)
+        state.updateBrowserUseAttention(for: pre, playSound: false)
+        try await Task.sleep(nanoseconds: 5_000_000)
+
+        XCTAssertNil(state.browserUseAttention)
+        XCTAssertEqual(state.surface, .collapsed)
+    }
+
+    func testOriginAnsweredDuringTheDelayWindowSuppressesTheCard() async throws {
+        let state = AppState()
+        state.sessions["s1"] = codexSession()
+        var answered = false
+        state.browserUseOriginPolicyProvider = { _ in
+            answered
+                ? BrowserUseOriginPolicy.parse("""
+                  [origins]
+                  allowed = ["http://127.0.0.1:9999"]
+                  """)
+                : .empty
+        }
+
+        let pre = try makeEvent(
+            name: "PreToolUse",
+            toolUseId: "exec-browser-answered",
+            code: #"await agent.browsers.getForUrl("http://127.0.0.1:9999/app");"#
+        )
+        state.cachePreToolUseIfApplicable(pre)
+        state.updateBrowserUseAttention(for: pre, delayNanoseconds: 30_000_000, playSound: false)
+        answered = true
+        try await Task.sleep(nanoseconds: 60_000_000)
+
+        XCTAssertNil(state.browserUseAttention)
+        XCTAssertEqual(state.surface, .collapsed)
+    }
+
+    func testUndecidedOriginStillRaisesTheCard() async throws {
+        let state = AppState()
+        state.sessions["s1"] = codexSession()
+        state.browserUseOriginPolicyProvider = { _ in .empty }
+
+        let pre = try makeEvent(
+            name: "PreToolUse",
+            toolUseId: "exec-browser-new-origin",
+            code: #"await agent.browsers.getForUrl("http://127.0.0.1:9999/app");"#
+        )
+        state.cachePreToolUseIfApplicable(pre)
+        state.updateBrowserUseAttention(for: pre, delayNanoseconds: 0, playSound: false)
+        try await Task.sleep(nanoseconds: 5_000_000)
+
+        XCTAssertEqual(state.browserUseAttention?.toolUseId, "exec-browser-new-origin")
+        XCTAssertEqual(state.surface, .browserUseAttention(sessionId: "s1"))
     }
 
     private func codexSession() -> SessionSnapshot {

@@ -104,6 +104,12 @@ final class AppState {
     var pendingToolUses: [String: PreToolUseRecord] = [:]
     @ObservationIgnored
     var browserUseAttentionDelayTasks: [String: Task<Void, Never>] = [:]
+    /// Reads Codex's Browser Use origin answers for one thread id. Injectable so tests
+    /// state the policy outright instead of depending on the developer's `~/.codex`.
+    @ObservationIgnored
+    var browserUseOriginPolicyProvider: (String) -> BrowserUseOriginPolicy = { threadId in
+        BrowserUseOriginPolicy.load(sessionId: threadId)
+    }
     @ObservationIgnored
     var browserUseAttentionTimeoutTask: Task<Void, Never>?
     /// Records the transcript path currently watched for each session so we only
