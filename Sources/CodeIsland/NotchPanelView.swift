@@ -3101,6 +3101,20 @@ private var cliIconCache: [String: NSImage] = [:]
 func cliIcon(source: String, size: CGFloat = 16) -> NSImage? {
     let key = "\(source)_\(Int(size))"
     if let cached = cliIconCache[key] { return cached }
+
+    // Codex Desktop is distributed as ChatGPT.app while retaining the
+    // com.openai.codex bundle identifier. Prefer its current application icon
+    // so the CLI group header matches native Codex session badges; keep the
+    // bundled icon as a fallback for machines without the desktop app.
+    if source == "codex",
+       let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex") {
+        let workspaceIcon = NSWorkspace.shared.icon(forFile: appURL.path)
+        let image = (workspaceIcon.copy() as? NSImage) ?? workspaceIcon
+        image.size = NSSize(width: size, height: size)
+        cliIconCache[key] = image
+        return image
+    }
+
     guard let filename = cliIconFiles[source],
           let url = Bundle.appModule.url(forResource: filename, withExtension: "png", subdirectory: "Resources/cli-icons"),
           let image = NSImage(contentsOf: url)
