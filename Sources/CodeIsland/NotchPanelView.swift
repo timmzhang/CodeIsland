@@ -2923,6 +2923,12 @@ private struct TerminalBadge: View {
     private var termIcon: NSImage? {
         let bid = session.termBundleId ?? Self.sourceBundleIds[session.source]
         guard let bid else { return nil }
+        // Codex Desktop currently ships inside ChatGPT.app, whose application
+        // icon is the ChatGPT knot. Keep Codex sessions branded with the
+        // bundled Codex cloud icon in the host badge.
+        if session.source == "codex", bid == AppState.codexAppBundleId {
+            return cliIcon(source: "codex", size: 13)
+        }
         if let cached = Self.termIconCache[bid] { return cached }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bid) else { return nil }
         let icon = NSWorkspace.shared.icon(forFile: url.path)
