@@ -105,6 +105,35 @@ final class CLIProcessResolverTests: XCTestCase {
         )
     }
 
+    /// Claude Code's native installer execs the versioned binary directly, so
+    /// `proc_pidpath` reports `~/.local/share/claude/versions/<version>` — a path
+    /// that does NOT end in "/claude". Without this the source-less Claude hook
+    /// reaches the app with no `_source`, and every Claude-specific correlation
+    /// in AppState (mirror-card dismissal on a terminal answer, transcript
+    /// decisions, replay dedup, always-allow rules) silently stops firing.
+    func testInferSourceRecognizesNativeClaudeVersionedBinary() {
+        let ancestry: [(pid: Int32, executablePath: String?)] = [
+            (1234, "/bin/bash"),
+            (5678, "/Users/u/.local/share/claude/versions/2.1.247"),
+            (9012, "/bin/zsh"),
+        ]
+        XCTAssertEqual(
+            CLIProcessResolver.inferSource(ancestry: ancestry),
+            "claude",
+            "Claude Code's native versioned binary must still resolve to the claude source"
+        )
+    }
+
+    /// A bare `versions/<v>` layout belonging to some other tool must not be
+    /// mistaken for Claude — the marker is the `/claude/versions/` segment.
+    func testInferSourceDoesNotMatchUnrelatedVersionedBinary() {
+        let ancestry: [(pid: Int32, executablePath: String?)] = [
+            (1234, "/bin/bash"),
+            (5678, "/Users/u/.local/share/somecli/versions/2.1.247"),
+        ]
+        XCTAssertNil(CLIProcessResolver.inferSource(ancestry: ancestry))
+    }
+
     /// #95 guard: the omo/OpenCode plugin fires the source-less Claude hook from
     /// inside OpenCode. The real `opencode` binary IS in the ancestry, so
     /// inferSource must still recover "opencode" (the original reason this

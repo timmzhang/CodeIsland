@@ -80,3 +80,14 @@ possible moment — not a bug in our code.
 4. Only drain when the provider previously told us it *was* waiting on approval.
    A bare "not waiting" notification can race ahead of the hook that opened the
    card and would kill a live prompt.
+5. That `PostToolUse` correlation is gated on
+   `ClaudePermissionRules.isClaudeEvent`, i.e. on the bridge having tagged the
+   payload `_source: "claude"`. The tag comes from process-ancestry inference,
+   so it breaks whenever Claude Code changes where its binary lives — the native
+   installer execs `~/.local/share/claude/versions/<version>`, a path that does
+   not end in `/claude`, and every Claude-specific path (mirror-card dismissal,
+   transcript decisions, replay dedup, always-allow rules) went silently dead.
+   Unit tests do not catch this: they hand `AppState` a payload that already has
+   `_source`. When a Claude correlation "stops working for no reason", capture a
+   real bridge payload first (point `CODEISLAND_SOCKET_PATH` at a throwaway
+   socket and read `_source`) before touching `AppState`.

@@ -347,7 +347,12 @@ if let source = effectiveSource {
 // ancestry inferred a real source — e.g. the omo OpenCode plugin firing
 // Claude hooks) so the host app can route them per pluginSessionMode.
 // See issue #123.
-if sourceTag == nil && effectiveSource != nil {
+//
+// "claude" is excluded: CodeIsland installs the source-less hook script into
+// Claude's own settings.json, so a Claude binary in the ancestry means the
+// hook fired from its primary CLI, not through a proxy. Marking it would let
+// pluginSessionMode "hide" swallow every real Claude session.
+if sourceTag == nil, let inferred = effectiveSource, inferred != "claude" {
     json["_via_plugin"] = true
 }
 

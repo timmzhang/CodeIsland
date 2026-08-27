@@ -29,7 +29,17 @@ public enum CLIProcessResolver {
         case "codex":
             return lowercasedPath.hasSuffix("/codex") || lowercasedPath.contains("/codex ")
         case "claude":
-            return lowercasedPath.hasSuffix("/claude") || lowercasedPath.contains("/claude ")
+            // Claude Code's native installer execs the *versioned* binary
+            // directly — proc_pidpath reports
+            // `~/.local/share/claude/versions/<version>`, which no longer ends
+            // in "/claude" the way the old launcher script did. Without this
+            // the bridge cannot tag Claude CLI hooks with `_source`, and every
+            // Claude-specific correlation (mirror-card dismissal, transcript
+            // decisions, replay dedup, always-allow rules) silently stops
+            // firing.
+            return lowercasedPath.hasSuffix("/claude")
+                || lowercasedPath.contains("/claude ")
+                || lowercasedPath.contains("/claude/versions/")
         case "qwen":
             return lowercasedPath.hasSuffix("/qwen")
                 || lowercasedPath.hasSuffix("/qwen-code")

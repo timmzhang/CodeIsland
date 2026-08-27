@@ -625,6 +625,86 @@ final class AppStateToolUseCacheTests: XCTestCase {
         XCTAssertEqual(appState.permissionQueue.count, 0)
     }
 
+    /// Two back-to-back Claude permission prompts in one turn, answered in the
+    /// terminal. Claude serializes them — PermissionRequest(A) → (user answers)
+    /// → PostToolUse(A) → PreToolUse(B) → PermissionRequest(B) — and its
+    /// PermissionRequest payload carries no tool_use_id. The mirror card must
+    /// follow: A is drained by its PostToolUse and B becomes the visible card.
+    func testSecondClaudePermissionBecomesVisibleAfterFirstIsAnsweredInTerminal() async throws {
+        let appState = AppState()
+        appState.sessions["s1"] = SessionSnapshot()
+
+        let firstTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(
+                    (try? self.makeHookEvent(
+                        name: "PermissionRequest",
+                        sessionId: "s1",
+                        toolName: "Bash",
+                        toolUseId: nil,
+                        toolInput: ["command": "touch /tmp/a.txt", "description": "Create file a"],
+                        source: "claude"
+                    ))!,
+                    continuation: cont
+                )
+            }
+        }
+        await Task.yield()
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        XCTAssertEqual(appState.surface, .approvalCard(sessionId: "s1"))
+
+        // User answered in Claude's own prompt: Claude drops the hook promise and
+        // runs the tool, so PostToolUse is the first observable signal.
+        appState.handleEvent(try makeHookEvent(
+            name: "PostToolUse",
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: "toolu_a",
+            toolInput: ["command": "touch /tmp/a.txt", "description": "Create file a"],
+            source: "claude"
+        ))
+        _ = await firstTask.value
+        XCTAssertEqual(appState.permissionQueue.count, 0)
+
+        appState.handleEvent(try makeHookEvent(
+            name: "PreToolUse",
+            sessionId: "s1",
+            toolName: "Bash",
+            toolUseId: "toolu_b",
+            toolInput: ["command": "touch /tmp/b.txt", "description": "Create file b"],
+            source: "claude"
+        ))
+
+        let secondTask = Task<Data, Never> {
+            await withCheckedContinuation { cont in
+                appState.handlePermissionRequest(
+                    (try? self.makeHookEvent(
+                        name: "PermissionRequest",
+                        sessionId: "s1",
+                        toolName: "Bash",
+                        toolUseId: nil,
+                        toolInput: ["command": "touch /tmp/b.txt", "description": "Create file b"],
+                        source: "claude"
+                    ))!,
+                    continuation: cont
+                )
+            }
+        }
+        await Task.yield()
+
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        XCTAssertEqual(
+            appState.pendingPermission?.event.toolInput?["command"] as? String,
+            "touch /tmp/b.txt",
+            "The card must advance to the second prompt, not stay on the answered one"
+        )
+        XCTAssertEqual(appState.surface, .approvalCard(sessionId: "s1"))
+
+        appState.approvePermission()
+        let secondResponse = await secondTask.value
+        XCTAssertEqual(try behavior(secondResponse), "allow")
+    }
+
     /// The (session, tool, input) fallback must stay precise: a PostToolUse for a
     /// *different* command in the same Claude session must not drain the pending card
     /// (parallel tool calls — #147/#169).
