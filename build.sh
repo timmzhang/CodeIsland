@@ -77,7 +77,12 @@ build_mac() {
     echo "Building $APP_NAME (arm64 only)..."
     swift build -c release --arch arm64
 
-    ARM_DIR=".build/arm64-apple-macosx/release"
+    # SwiftPM moved its product directory with the swift-build build system
+    # (.build/out/Products/Release on Swift 6.4); ask it rather than guessing.
+    ARM_DIR="$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null || true)"
+    if [ -z "$ARM_DIR" ] || [ ! -x "$ARM_DIR/$APP_NAME" ]; then
+        ARM_DIR=".build/arm64-apple-macosx/release"
+    fi
 
     echo "Creating app bundle..."
     rm -rf "$APP_BUNDLE"
@@ -129,8 +134,10 @@ build_mac() {
     fi
     cp "Sources/CodeIsland/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
-    # Copy SPM resource bundles into Contents/Resources/ (required for code signing)
-    for bundle in .build/*/release/*.bundle; do
+    # Copy SPM resource bundles into Contents/Resources/ (required for code signing).
+    # Bundle.appModule looks them up there; a bundle-less app traps in Bundle.module
+    # on launch, so prefer the product directory SwiftPM reported above.
+    for bundle in "$ARM_DIR"/*.bundle .build/*/release/*.bundle; do
         if [ -e "$bundle" ]; then
             cp -R "$bundle" "$APP_BUNDLE/Contents/Resources/"
             break

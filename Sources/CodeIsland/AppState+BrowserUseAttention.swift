@@ -34,7 +34,21 @@ enum BrowserUseAttentionTrigger: Equatable {
 }
 
 enum BrowserUseAttentionDetector {
+    /// The Browser plugin's own server. Kept as the canonical name for previews and
+    /// tests; `toolNames` is what the detector actually accepts.
     static let toolName = "mcp__node_repl__js"
+    /// Codex ships the same Browser Use runtime under two MCP servers: the standalone
+    /// Browser plugin (`node_repl`) and the unified Computer Use plugin (`cua_repl`),
+    /// which the desktop app now installs by default. Both raise the same origin prompt
+    /// and persist answers to the same `$CODEX_HOME/browser/` files, so the card has to
+    /// key off either name — a `web.goto(...)` under `cua_repl` blocked for eight
+    /// minutes without a card before this list existed.
+    static let toolNames: Set<String> = ["mcp__node_repl__js", "mcp__cua_repl__js"]
+
+    static func isBrowserUseTool(_ toolName: String?) -> Bool {
+        guard let toolName else { return false }
+        return toolNames.contains(toolName)
+    }
     /// Long enough for a quick call to finish on its own, short enough that a real
     /// prompt is surfaced while the user is still looking at the screen.
     static let undecidedOriginDelayNanoseconds: UInt64 = 2_000_000_000
@@ -65,7 +79,7 @@ enum BrowserUseAttentionDetector {
     static func candidate(for event: HookEvent, now: Date = Date()) -> BrowserUseAttention? {
         guard EventNormalizer.normalize(event.eventName) == "PreToolUse",
               CodexPermissionRules.isCodexEvent(event),
-              event.toolName == toolName,
+              isBrowserUseTool(event.toolName),
               let toolUseId = event.toolUseId,
               !toolUseId.isEmpty,
               let code = browserCode(in: event.toolInput),
@@ -99,7 +113,14 @@ enum BrowserUseAttentionDetector {
             ".playwright.",
             ".navigate(",
             ".goto(",
-            ".screenshot("
+            ".screenshot(",
+            // Unified Computer Use (`cua_repl`): only its browser bindings can reach an
+            // origin prompt. `cua.getApp(...)` drives native apps and stays out.
+            "cua.createbrowsertab(",
+            "cua.getbrowser(",
+            "cua.gettab(",
+            "cua.listbrowsers(",
+            "cua.listtabs("
         ]
         return markers.contains { normalized.contains($0) }
     }

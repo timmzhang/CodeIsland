@@ -38,6 +38,50 @@ final class BrowserUseAttentionTests: XCTestCase {
         XCTAssertNil(BrowserUseAttentionDetector.candidate(for: otherSource))
     }
 
+    func testDetectorAcceptsTheUnifiedComputerUseServer() throws {
+        // 2026-09-20: `web.goto("http://127.0.0.1:63778")` under `mcp__cua_repl__js` sat
+        // on Codex's origin prompt for eight minutes with no card, because the detector
+        // only knew the Browser plugin's `mcp__node_repl__js`.
+        let cua = try makeEvent(
+            name: "PreToolUse",
+            toolUseId: "call_4CT9srRtk7cGZxtqBJuGMmZm",
+            code: "await web.goto('http://127.0.0.1:63778'); await web.getAXState();",
+            toolName: "mcp__cua_repl__js"
+        )
+        let candidate = try XCTUnwrap(BrowserUseAttentionDetector.candidate(for: cua))
+        XCTAssertEqual(candidate.target, "http://127.0.0.1:63778")
+        XCTAssertEqual(candidate.navigation, .direct(url: "http://127.0.0.1:63778"))
+
+        let newTab = try makeEvent(
+            name: "PreToolUse",
+            toolUseId: "call-cua-tab",
+            code: "const b = await cua.getBrowser(); const t = await cua.createBrowserTab(b.browserId, 'https://data.bytedance.net'); await t.getAXState();",
+            toolName: "mcp__cua_repl__js"
+        )
+        XCTAssertEqual(
+            BrowserUseAttentionDetector.candidate(for: newTab)?.navigation,
+            .direct(url: "https://data.bytedance.net")
+        )
+
+        // Native-app driving through the same server never reaches a browser origin.
+        let nativeApp = try makeEvent(
+            name: "PreToolUse",
+            toolUseId: "call-cua-app",
+            code: "const app = await cua.getApp('Finder'); await app.click(3); await app.getAXState();",
+            toolName: "mcp__cua_repl__js"
+        )
+        XCTAssertNil(BrowserUseAttentionDetector.candidate(for: nativeApp))
+
+        // Any other MCP `js` tool is not Browser Use, whatever its code looks like.
+        let unrelated = try makeEvent(
+            name: "PreToolUse",
+            toolUseId: "call-other",
+            code: "await tab.goto('https://example.com')",
+            toolName: "mcp__other_repl__js"
+        )
+        XCTAssertNil(BrowserUseAttentionDetector.candidate(for: unrelated))
+    }
+
     func testAttentionAppearsAfterDelayAndPostToolUseClearsIt() async throws {
         let state = AppState()
         state.sessions["s1"] = codexSession()
@@ -273,6 +317,32 @@ final class BrowserUseAttentionTests: XCTestCase {
         )
     }
 
+    func testComputerUseTabVerbsMapOntoTheSameShapes() {
+        XCTAssertEqual(
+            BrowserUseCallShape.read(
+                #"cua.createBrowserTab('chrome','https://code.byted.org/iOS_Library/BDAutoTracker',{sessionName:'🔎 仓库权限来源'})"#
+            ).navigation,
+            .direct(url: "https://code.byted.org/iOS_Library/BDAutoTracker")
+        )
+        XCTAssertEqual(
+            BrowserUseCallShape.read("const t = await cua.createBrowserTab(browser.browserId, target);").navigation,
+            .direct(url: nil)
+        )
+        // A blank tab; the goto that follows is what asks for an origin.
+        XCTAssertEqual(
+            BrowserUseCallShape.read("const t = await cua.createBrowserTab(browser.browserId);").navigation,
+            .none
+        )
+        XCTAssertEqual(
+            BrowserUseCallShape.read("await web.pressKey('Enter'); await web.getAXState();").navigation,
+            .indirect
+        )
+        XCTAssertEqual(
+            BrowserUseCallShape.read("await web.typeText('hello'); await web.scroll(4, 'down'); await web.back();").navigation,
+            .none
+        )
+    }
+
     func testDeclaredWaitsAreSummedAndCapped() {
         XCTAssertEqual(
             BrowserUseCallShape.read(
@@ -442,12 +512,13 @@ final class BrowserUseAttentionTests: XCTestCase {
         name: String,
         toolUseId: String?,
         code: String?,
-        source: String = "codex"
+        source: String = "codex",
+        toolName: String = BrowserUseAttentionDetector.toolName
     ) throws -> HookEvent {
         var payload: [String: Any] = [
             "hook_event_name": name,
             "session_id": "s1",
-            "tool_name": BrowserUseAttentionDetector.toolName,
+            "tool_name": toolName,
             "_source": source
         ]
         if let toolUseId { payload["tool_use_id"] = toolUseId }

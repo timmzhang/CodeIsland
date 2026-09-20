@@ -26,7 +26,8 @@ origin: http://localhost:38081
 ```
 
 It is asked **only when the browser is sent somewhere** — `goto`, `navigate`,
-`getForUrl`, `tabs.new(url)`, or a click that follows a link off-origin. Reads of the
+`getForUrl`, `tabs.new(url)`, `cua.createBrowserTab(browserId, url)`, or a click /
+`pressKey` that follows a link off-origin. Reads of the
 page already open (`evaluate`, `domSnapshot`, `innerText`, `screenshot`, locator
 queries) never raise it, *including* an in-page `fetch("https://other.example/…")`:
 that request is the page's, not a navigation. `reload` / `goBack` / `goForward`
@@ -49,8 +50,15 @@ runs straight through, denied fails outright.
 
 ## What we do and don't observe (verified, don't re-litigate)
 
-- The prompt is **not** a hook event. Only `PreToolUse(mcp__node_repl__js)` arrives;
+- The prompt is **not** a hook event. Only the `PreToolUse` for the `js` call arrives;
   there is no `PermissionRequest`, and the denied path never sends `PostToolUse`.
+- The same runtime answers to **two MCP server names**: `mcp__node_repl__js` (the
+  standalone Browser plugin) and `mcp__cua_repl__js` (the unified Computer Use plugin
+  the Codex desktop app installs, which also drives native apps via `cua.getApp`).
+  Both raise the identical prompt and write the identical `$CODEX_HOME/browser/`
+  files — verified 2026-09-20 when a `cua_repl` "Always allow" appended
+  `http://127.0.0.1:63778` to `browser/config.toml`. Keying the card on one name
+  silently drops the other (p-6jnh: an eight-minute stall with no card).
 - It is **not** in the rollout either. `mcp_tool_call_end` carries the outcome
   (`_meta.codex/browserUse`, `browser_use.url`), never the question. Grepping a full
   `~/.codex/sessions` history for the prompt text finds only agent prose quoting it.

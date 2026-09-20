@@ -7,8 +7,9 @@ enum BrowserUseNavigation: Equatable {
     /// `screenshot`, locator reads. Codex never asks about an origin it isn't visiting,
     /// so however long these run, they are not waiting on a confirmation.
     case none
-    /// `goto` / `navigate` / `getForUrl` / `tabs.new(url)`. `url` is the destination when
-    /// the code spells one out, `nil` when it comes from a variable.
+    /// `goto` / `navigate` / `getForUrl` / `tabs.new(url)` /
+    /// `cua.createBrowserTab(browserId, url)`. `url` is the destination when the code
+    /// spells one out, `nil` when it comes from a variable.
     case direct(url: String?)
     /// A click or key press that may follow a link to another origin.
     case indirect
@@ -42,18 +43,23 @@ struct BrowserUseCallShape: Equatable {
 
     // MARK: - Navigation
 
-    /// `tab.goto(…)`, `browser.navigate(…)`, `agent.browsers.getForUrl(…)`, and
-    /// `tabs.new(…)` *with* an argument. A bare `tabs.new()` opens a blank tab and is
-    /// left out: the `goto` that follows is what asks for an origin. `reload`,
-    /// `goBack` and `goForward` are left out too — they revisit an origin the browser
+    /// `tab.goto(…)`, `browser.navigate(…)`, `agent.browsers.getForUrl(…)`,
+    /// `tabs.new(…)` *with* an argument, and the unified Computer Use runtime's
+    /// `cua.createBrowserTab(browserId, url)` *with* its second argument. A bare
+    /// `tabs.new()` / `createBrowserTab(id)` opens a blank tab and is left out: the
+    /// `goto` that follows is what asks for an origin. `reload`, `goBack`, `back`,
+    /// `forward` and `goForward` are left out too — they revisit an origin the browser
     /// is already on, which by definition has an answer on record.
     private static let directNavigation = try? NSRegularExpression(
-        pattern: #"\.(?:goto|navigate|getForUrl)\s*\(|\btabs\.new\s*\(\s*[^)\s]"#,
+        pattern: #"\.(?:goto|navigate|getForUrl)\s*\(|\btabs\.new\s*\(\s*[^)\s]|\bcreateBrowserTab\s*\(\s*[^,)]+,\s*[^)\s]"#,
         options: [.caseInsensitive]
     )
 
+    /// Playwright-style `click`/`press`/… plus the Computer Use `Target` verbs that can
+    /// follow a link or submit a form (`pressKey("Enter")`). `typeText`, `paste`,
+    /// `scroll` and `setValue` only edit the page that is already open.
     private static let interaction = try? NSRegularExpression(
-        pattern: #"\.(?:click|dblclick|press|tap|submit|selectOption)\s*\("#,
+        pattern: #"\.(?:click|dblclick|press|pressKey|tap|submit|selectOption)\s*\("#,
         options: [.caseInsensitive]
     )
 
