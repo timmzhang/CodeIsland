@@ -532,6 +532,18 @@ public final class JSONLTailer: @unchecked Sendable {
             return
         }
 
+        // TaskStop ends a background shell silently: Claude records only the
+        // tool result and never emits a <task-notification> for a task the model
+        // stopped itself (p-zvxz). Treat that result as the terminal event, or the
+        // session stays pinned on "Background shell" after Stop.
+        if lineData.range(of: taskStoppedMarker) != nil,
+           let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+           let taskId = stoppedBackgroundTaskId(in: json) {
+            appendUnique(taskId, to: &delta.finishedBackgroundTaskIds)
+            delta.hasActivity = true
+            return
+        }
+
         // Fast path: realistic Claude transcripts are ~75% tool_use / tool_result /
         // meta rows we don't care about. Skipping the JSON parse for those saves a
         // measurable chunk of CPU per byte during streaming bursts.
@@ -619,6 +631,22 @@ public final class JSONLTailer: @unchecked Sendable {
             return prompt
         }
         return nil
+    }
+
+    /// `TaskStop` reports `{"message":"Successfully stopped task: <id> (<command>)"}`
+    /// in `toolUseResult`; the id is the first token after the fixed prefix.
+    private static func stoppedBackgroundTaskId(in json: [String: Any]) -> String? {
+        let message: String?
+        if let result = json["toolUseResult"] as? [String: Any] {
+            message = result["message"] as? String
+        } else {
+            message = json["toolUseResult"] as? String
+        }
+        guard let message,
+              let prefixRange = message.range(of: taskStoppedPrefix) else { return nil }
+        let rest = message[prefixRange.upperBound...]
+        let taskId = rest.prefix { !$0.isWhitespace && $0 != "(" }
+        return taskId.isEmpty ? nil : String(taskId)
     }
 
     private static func xmlValue(named name: String, in text: String) -> String? {
@@ -849,6 +877,8 @@ public final class JSONLTailer: @unchecked Sendable {
     private static let codexTokenCountMarker = Data(#""token_count""#.utf8)
     private static let backgroundTaskIdMarker = Data(#""backgroundTaskId""#.utf8)
     private static let taskNotificationMarker = Data("<task-notification>".utf8)
+    private static let taskStoppedPrefix = "Successfully stopped task: "
+    private static let taskStoppedMarker = Data(taskStoppedPrefix.utf8)
     private static let terminalBackgroundTaskStatuses: Set<String> = [
         "completed", "failed", "cancelled", "canceled", "killed", "terminated",
     ]

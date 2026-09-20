@@ -27,6 +27,32 @@ final class AppStateClaudeBackgroundTaskTests: XCTestCase {
         XCTAssertEqual(appState.sessions["s1"]?.isWaitingForBackgroundTasks, true)
     }
 
+    func testStopAfterTaskStopDeclaresCompletion() throws {
+        // p-zvxz: a task the model stopped via TaskStop never gets a
+        // <task-notification>, so the Stop hook must still reach idle.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codeisland-claude-taskstop-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let started = #"{"type":"user","toolUseResult":{"backgroundTaskId":"b3dz13i90"}}"#
+        let stopped = #"{"type":"user","toolUseResult":{"message":"Successfully stopped task: b3dz13i90 (pins view x.md --no-open)"}}"#
+        try Data((started + "\n" + stopped + "\n").utf8).write(to: url)
+
+        let payload: [String: Any] = [
+            "hook_event_name": "Stop",
+            "session_id": "s1",
+            "_source": "claude",
+            "transcript_path": url.path,
+        ]
+        let event = try XCTUnwrap(HookEvent(from: JSONSerialization.data(withJSONObject: payload)))
+        let appState = AppState()
+
+        appState.handleEvent(event)
+
+        XCTAssertEqual(appState.sessions["s1"]?.status, .idle)
+        XCTAssertEqual(appState.sessions["s1"]?.activeBackgroundTaskIds, [])
+        XCTAssertEqual(appState.sessions["s1"]?.isWaitingForBackgroundTasks, false)
+    }
+
     func testLateTranscriptStartRevivesSessionAfterStopRace() {
         let appState = AppState()
         var session = SessionSnapshot()

@@ -172,6 +172,29 @@ final class JSONLTailerTests: XCTestCase {
         XCTAssertNil(result.delta.lastUserPrompt)
     }
 
+    func testScanLinesTreatsTaskStopResultAsFinishedBackgroundTask() {
+        // Real shape from a session where a `pins view` daemon kept stdout open:
+        // Bash timed out into the background, the model called TaskStop, and no
+        // <task-notification> ever followed for that id.
+        let started = #"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"Command did not complete within its 120s timeout and was moved to the background (ID: b3dz13i90)."}]},"toolUseResult":{"stdout":"","backgroundTaskId":"b3dz13i90","timedOutAfterMs":120000}}"#
+        let stopped = #"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_2","type":"tool_result","content":"{\"message\":\"Successfully stopped task: b3dz13i90 (pins view x.md --no-open)\"}"}]},"toolUseResult":{"message":"Successfully stopped task: b3dz13i90 (pins view x.md --no-open)"}}"#
+
+        let result = JSONLTailer.scanLines(Data((started + "\n" + stopped + "\n").utf8))
+
+        XCTAssertEqual(result.delta.startedBackgroundTaskIds, ["b3dz13i90"])
+        XCTAssertEqual(result.delta.finishedBackgroundTaskIds, ["b3dz13i90"])
+        XCTAssertTrue(result.delta.hasActivity)
+        XCTAssertNil(result.delta.lastUserPrompt, "TaskStop tool results must not replace the real prompt")
+    }
+
+    func testScanLinesIgnoresTaskStopResultWithoutTaskId() {
+        let row = #"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"x"}]},"toolUseResult":{"message":"Successfully stopped task: "}}"#
+
+        let result = JSONLTailer.scanLines(Data((row + "\n").utf8))
+
+        XCTAssertTrue(result.delta.finishedBackgroundTaskIds.isEmpty)
+    }
+
     func testScanLinesIgnoresNonterminalClaudeTaskNotifications() {
         let running = #"{"type":"queue-operation","content":"<task-notification>\n<task-id>bg-789</task-id>\n<status>running</status>\n</task-notification>"}"#
 
