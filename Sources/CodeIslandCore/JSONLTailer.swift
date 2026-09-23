@@ -33,6 +33,25 @@ public enum CursorQuestionSignal: Equatable, Sendable {
     case cleared
 }
 
+/// Trailing state of a Codex `request_user_input_async` question.
+///
+/// The async question tool does not block the turn: Codex records the question,
+/// answers the tool call with `{"accepted":true}` on the spot and keeps working,
+/// while its TUI parks the question under "Queued follow-up inputs" (⌥↑ to
+/// answer) and marks the terminal title "Action Required". No hook fires for the
+/// tool and the app-server carries it as a plain `item/completed`, so the rollout
+/// row is the only signal. `pending` means "an async question was recorded and no
+/// user message has followed it"; `cleared` means "a user message row came after
+/// it" — the answer itself is submitted as an ordinary user turn quoting the
+/// question, and any newer prompt proves the user is already back in the terminal.
+public enum CodexAsyncQuestionSignal: Equatable, Sendable {
+    /// `prompt` is the first question title (with a `(+N)` suffix when several
+    /// were asked at once); `askedAt` is the rollout row timestamp when parseable.
+    case pending(prompt: String, askedAt: Date?)
+    /// A user message row was appended after the question.
+    case cleared
+}
+
 /// A delta emitted by `JSONLTailer` whenever the watched transcript grows.
 public struct ConversationTailDelta: Equatable, Sendable {
     public let sessionId: String
@@ -56,6 +75,7 @@ public struct ConversationTailDelta: Equatable, Sendable {
     public let turnStatus: ConversationTurnStatus?
     public let hasActivity: Bool
     public let cursorQuestion: CursorQuestionSignal?
+    public let codexAsyncQuestion: CodexAsyncQuestionSignal?
 
     public init(
         sessionId: String,
@@ -69,7 +89,8 @@ public struct ConversationTailDelta: Equatable, Sendable {
         finishedBackgroundTaskIds: [String] = [],
         turnStatus: ConversationTurnStatus? = nil,
         hasActivity: Bool = false,
-        cursorQuestion: CursorQuestionSignal? = nil
+        cursorQuestion: CursorQuestionSignal? = nil,
+        codexAsyncQuestion: CodexAsyncQuestionSignal? = nil
     ) {
         self.sessionId = sessionId
         self.lastUserPrompt = lastUserPrompt
@@ -83,6 +104,7 @@ public struct ConversationTailDelta: Equatable, Sendable {
         self.turnStatus = turnStatus
         self.hasActivity = hasActivity
         self.cursorQuestion = cursorQuestion
+        self.codexAsyncQuestion = codexAsyncQuestion
     }
 
     /// A delta only carries signal when at least one field is non-nil.
@@ -92,7 +114,7 @@ public struct ConversationTailDelta: Equatable, Sendable {
             && codexUsageEvents.isEmpty
             && startedBackgroundTaskIds.isEmpty && finishedBackgroundTaskIds.isEmpty
             && turnStatus == nil
-            && !hasActivity && cursorQuestion == nil
+            && !hasActivity && cursorQuestion == nil && codexAsyncQuestion == nil
     }
 }
 
@@ -348,7 +370,8 @@ public final class JSONLTailer: @unchecked Sendable {
                 finishedBackgroundTaskIds: scan.delta.finishedBackgroundTaskIds,
                 turnStatus: scan.delta.turnStatus,
                 hasActivity: scan.delta.hasActivity,
-                cursorQuestion: scan.delta.cursorQuestion
+                cursorQuestion: scan.delta.cursorQuestion,
+                codexAsyncQuestion: scan.delta.codexAsyncQuestion
             )
             onDelta(delta)
         }
@@ -390,6 +413,7 @@ public final class JSONLTailer: @unchecked Sendable {
             public var turnStatus: ConversationTurnStatus?
             public var hasActivity = false
             public var cursorQuestion: CursorQuestionSignal?
+            public var codexAsyncQuestion: CodexAsyncQuestionSignal?
             public var isEmpty: Bool {
                 lastUserPrompt == nil
                     && lastAssistantMessage == nil
@@ -402,6 +426,7 @@ public final class JSONLTailer: @unchecked Sendable {
                     && turnStatus == nil
                     && !hasActivity
                     && cursorQuestion == nil
+                    && codexAsyncQuestion == nil
             }
         }
         public let delta: Delta
@@ -548,7 +573,22 @@ public final class JSONLTailer: @unchecked Sendable {
         // meta rows we don't care about. Skipping the JSON parse for those saves a
         // measurable chunk of CPU per byte during streaming bursts.
         let kind = quickTypeProbe(lineBytes: lineData)
-        guard kind != .irrelevant else { return }
+        guard kind != .irrelevant else {
+            // Codex writes the user's turn input as `response_item` / `message` /
+            // `role: user` — a shape the byte probe deliberately skips. It is the
+            // only row that proves a queued async question was answered (or at
+            // least that the user is back in the terminal), so it is checked here,
+            // after the probe, where Claude's `"role":"user"` rows never arrive.
+            if lineData.range(of: codexUserRoleMarker) != nil,
+               let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+               json["type"] as? String == "response_item",
+               let payload = json["payload"] as? [String: Any],
+               payload["type"] as? String == "message",
+               payload["role"] as? String == "user" {
+                delta.codexAsyncQuestion = .cleared
+            }
+            return
+        }
 
         guard let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { return }
         if json["isMeta"] as? Bool == true { return }
@@ -589,6 +629,13 @@ public final class JSONLTailer: @unchecked Sendable {
             case "mcp_tool_call_end":
                 if let callId = payload["call_id"] as? String, !callId.isEmpty {
                     delta.completedToolCallIds.append(callId)
+                }
+            case "item_completed":
+                if let prompt = codexAsyncQuestionPrompt(inItem: payload["item"]) {
+                    delta.codexAsyncQuestion = .pending(
+                        prompt: prompt,
+                        askedAt: codexRowTimestamp(json["timestamp"])
+                    )
                 }
             default:
                 break
@@ -762,6 +809,61 @@ public final class JSONLTailer: @unchecked Sendable {
         return ""
     }
 
+    /// Display text for a Codex `request_user_input_async` question, or nil when
+    /// the `item_completed` item is anything else.
+    ///
+    /// The async tool is recorded as an `AgentMessage` item whose `delivery` is
+    /// `"async"` and whose `questions` array carries the `title` of each question;
+    /// ordinary replies have neither field. The text is the first title with a
+    /// `(+N)` suffix for further questions, falling back to the message text.
+    static func codexAsyncQuestionPrompt(inItem item: Any?) -> String? {
+        guard let item = item as? [String: Any],
+              item["type"] as? String == "AgentMessage",
+              item["delivery"] as? String == "async",
+              let questions = item["questions"] as? [[String: Any]],
+              !questions.isEmpty else { return nil }
+
+        let titles = questions.compactMap { question -> String? in
+            let raw = (question["title"] as? String) ?? (question["question"] as? String)
+            let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return text.isEmpty ? nil : text
+        }
+        if let first = titles.first {
+            return titles.count > 1 ? "\(first) (+\(titles.count - 1))" : first
+        }
+        return extractCodexAgentMessageText(item["content"]) ?? ""
+    }
+
+    private static func extractCodexAgentMessageText(_ content: Any?) -> String? {
+        guard let blocks = content as? [[String: Any]] else { return nil }
+        let parts = blocks.compactMap { block -> String? in
+            guard block["type"] as? String == "Text" else { return nil }
+            let text = (block["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return text.isEmpty ? nil : text
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n")
+    }
+
+    /// Codex rollout rows carry an RFC 3339 `timestamp` with fractional seconds
+    /// (`2026-09-23T01:28:54.028Z`). Nil when absent or unparseable.
+    static func codexRowTimestamp(_ value: Any?) -> Date? {
+        guard let text = value as? String, !text.isEmpty else { return nil }
+        return codexFractionalTimestampFormatter.date(from: text)
+            ?? codexPlainTimestampFormatter.date(from: text)
+    }
+
+    private static let codexFractionalTimestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let codexPlainTimestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
     /// Types we care about for the panel: `"user"` and `"assistant"`. Anything
     /// else — including unknown types and absent-type lines — can be skipped
     /// without bothering the JSON parser. `cursorRole` marks lines that carry
@@ -875,6 +977,10 @@ public final class JSONLTailer: @unchecked Sendable {
     private static let assistantBytes: [UInt8] = Array(#"assistant""#.utf8)
     private static let codexTurnContextMarker = Data(#""turn_context""#.utf8)
     private static let codexTokenCountMarker = Data(#""token_count""#.utf8)
+    /// Codex `response_item` user rows serialize `"role":"user"` at the payload
+    /// level; Claude nests the same pair inside `message`, but those rows are
+    /// routed by the type probe before this marker is ever consulted.
+    private static let codexUserRoleMarker = Data(#""role":"user""#.utf8)
     private static let backgroundTaskIdMarker = Data(#""backgroundTaskId""#.utf8)
     private static let taskNotificationMarker = Data("<task-notification>".utf8)
     private static let taskStoppedPrefix = "Successfully stopped task: "

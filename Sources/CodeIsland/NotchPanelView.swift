@@ -343,6 +343,18 @@ struct NotchPanelView: View {
                                 onSkip: { }
                             )
                             .transition(.blurFade.combined(with: .scale(scale: 0.96, anchor: .top)))
+                        } else if appState.codexAsyncQuestionCardIsShowing,
+                                  let question = session?.codexPendingQuestion {
+                            // Codex async question queued in its own TUI (⌥↑ to answer):
+                            // no answer channel here, so this is a reminder in the
+                            // Browser Use mould that jumps back to the terminal.
+                            CodexAsyncQuestionBar(
+                                question: question,
+                                sessionContext: session?.cwd,
+                                onOpen: { appState.openCodexAsyncQuestionSession() },
+                                onDismiss: { appState.dismissCodexAsyncQuestionCard() }
+                            )
+                            .transition(.blurFade.combined(with: .scale(scale: 0.96, anchor: .top)))
                         }
                     case .browserUseAttention(let sid):
                         if let attention = appState.browserUseAttention,
@@ -1432,6 +1444,111 @@ private struct BrowserUseAttentionBar: View {
     }
 }
 
+// MARK: - Codex async question reminder (display-only, answered in the Codex TUI)
+
+private struct CodexAsyncQuestionBar: View {
+    let question: String
+    let sessionContext: String?
+    let onOpen: () -> Void
+    let onDismiss: () -> Void
+    @ObservedObject private var l10n = L10n.shared
+
+    private let orange = Color(red: 1.0, green: 0.7, blue: 0.28)
+
+    var body: some View {
+        VStack(spacing: 9) {
+            HStack(spacing: 7) {
+                Text("?")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(orange)
+                    .frame(width: 16, height: 16)
+                    .background(orange.opacity(0.12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(orange.opacity(0.55), lineWidth: 1)
+                    )
+                Text(l10n["codex_async_question_title"])
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(orange)
+                Text(l10n["codex_async_question_subtitle"])
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.62))
+                Spacer()
+            }
+
+            Button(action: onOpen) {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(question.isEmpty ? l10n["codex_async_question_body"] : question)
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.88))
+                            .lineLimit(3)
+                        if let context = sessionContext, !context.isEmpty {
+                            Text((context as NSString).lastPathComponent)
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.43))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(.white.opacity(0.055))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .strokeBorder(.white.opacity(0.19), lineWidth: 1)
+                            )
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(orange)
+                    }
+                    .frame(width: 27, height: 27)
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 9)
+                .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(.white.opacity(0.035))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7)
+                        .strokeBorder(orange.opacity(0.22), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+
+            HStack(spacing: 10) {
+                Text(l10n["codex_async_question_note"])
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.white.opacity(0.43))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                HStack(spacing: 6) {
+                    PixelButton(
+                        label: l10n["dismiss"],
+                        fg: .white.opacity(0.95),
+                        bg: Color(red: 0.25, green: 0.25, blue: 0.25),
+                        border: .white.opacity(0.28),
+                        action: onDismiss
+                    )
+                    PixelButton(
+                        label: l10n["browser_use_attention_open"],
+                        fg: .white.opacity(0.95),
+                        bg: Color(red: 0.10, green: 0.27, blue: 0.12),
+                        border: Color(red: 0.28, green: 0.62, blue: 0.32),
+                        action: onOpen
+                    )
+                }
+                .frame(width: 210)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+}
+
 // MARK: - Question Bar (below notch, auto-expanded)
 
 @MainActor
@@ -2372,6 +2489,11 @@ private struct SessionCard: View {
     private var showsExternalCursorQuestion: Bool {
         session.status == .waitingQuestion && session.cursorPendingQuestion != nil
     }
+    /// Codex parked a `request_user_input_async` question in its TUI queue. The
+    /// turn keeps running, so this does not depend on `status` at all.
+    private var showsCodexAsyncQuestion: Bool {
+        session.codexPendingQuestion != nil
+    }
     private var statusNameColor: Color {
         if session.status == .idle && session.interrupted {
             return Color(red: 1.0, green: 0.45, blue: 0.35)
@@ -2569,6 +2691,30 @@ private struct SessionCard: View {
                             }
                         }
                         Text(L10n.shared["cursor_question_answer_hint"])
+                            .font(.system(size: max(10, fontSize - 1), design: .monospaced))
+                            .foregroundStyle(Color(red: 1.0, green: 0.6, blue: 0.2).opacity(0.85))
+                    }
+                }
+
+                // Codex queued an async question (⌥↑ in its TUI). The turn may still
+                // be running or already finished — either way the queue line at the
+                // bottom of the terminal is easy to miss, so keep the hint on the row
+                // until a user message shows the question was handled.
+                if showsCodexAsyncQuestion {
+                    VStack(alignment: .leading, spacing: 3) {
+                        if let question = session.codexPendingQuestion, !question.isEmpty {
+                            HStack(alignment: .top, spacing: 5) {
+                                Text("?")
+                                    .font(.system(size: fontSize, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(Color(red: 1.0, green: 0.6, blue: 0.2))
+                                Text(question)
+                                    .font(.system(size: fontSize, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .lineLimit(2)
+                                    .truncationMode(.tail)
+                            }
+                        }
+                        Text(L10n.shared["codex_async_question_answer_hint"])
                             .font(.system(size: max(10, fontSize - 1), design: .monospaced))
                             .foregroundStyle(Color(red: 1.0, green: 0.6, blue: 0.2).opacity(0.85))
                     }

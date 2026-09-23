@@ -10,9 +10,10 @@ import CodeIslandCore
 //   working     — single session actively running tools
 //   approval    — session waiting for permission
 //   browser-attention — Browser Use may need confirmation in Codex
+//   codex-question — Codex async question queued in its TUI (⌥↑ to answer)
 //   question    — session with pending question
 //   completion  — session just finished
-//   multi       — 3 sessions in mixed states
+//   multi       — 4 sessions in mixed states
 //   busy        — heavy workload with subagents
 //   claude      — Claude CLI single session
 //   codex       — Codex CLI single session
@@ -27,6 +28,7 @@ enum PreviewScenario: String, CaseIterable {
     case working
     case approval
     case browserAttention = "browser-attention"
+    case codexQuestion = "codex-question"
     case question
     case completion
     case multi
@@ -67,6 +69,8 @@ enum DebugHarness {
             applyApproval(to: appState)
         case .browserAttention:
             applyBrowserAttention(to: appState)
+        case .codexQuestion:
+            applyCodexQuestion(to: appState)
         case .question:
             applyQuestion(to: appState)
         case .completion:
@@ -169,6 +173,26 @@ enum DebugHarness {
         state.surface = .browserUseAttention(sessionId: sessionId)
     }
 
+    private static func applyCodexQuestion(to state: AppState) {
+        let sessionId = "preview-codex-question"
+        var s = SessionSnapshot()
+        s.status = .running
+        s.cwd = "/Users/dev/OnCue_p-phij"
+        s.model = "gpt-5"
+        s.source = "codex"
+        s.currentTool = "Bash"
+        s.toolDescription = "xcodebuild test"
+        s.lastUserPrompt = "继续"
+        s.addRecentMessage(ChatMessage(isUser: true, text: "继续"))
+        s.termApp = "Ghostty"
+        s.codexPendingQuestion = "请在手机上点“请求通知权限”，并在 iOS 弹窗中选择“允许”；完成后把权限状态和排期数量告诉我。"
+
+        state.sessions[sessionId] = s
+        state.activeSessionId = sessionId
+        state.codexAsyncQuestionCardSessionId = sessionId
+        state.surface = .questionCard(sessionId: sessionId)
+    }
+
     private static func applyQuestion(to state: AppState) {
         var s = SessionSnapshot()
         s.status = .waitingQuestion
@@ -251,9 +275,21 @@ enum DebugHarness {
         s3.addRecentMessage(ChatMessage(isUser: true, text: "Fix the scroll jank"))
         s3.cursorPendingQuestion = "Which list component should I optimize first? (+1)"
 
+        // Session 4: Codex kept working after queueing an async question in its TUI
+        var s4 = SessionSnapshot()
+        s4.status = .running
+        s4.cwd = "/Users/dev/OnCue_p-phij"
+        s4.source = "codex"
+        s4.currentTool = "Bash"
+        s4.toolDescription = "xcodebuild test"
+        s4.lastUserPrompt = "继续"
+        s4.addRecentMessage(ChatMessage(isUser: true, text: "继续"))
+        s4.codexPendingQuestion = "请在手机上点“请求通知权限”，并在 iOS 弹窗中选择“允许”；完成后把权限状态和排期数量告诉我。"
+
         state.sessions["preview-multi-1"] = s1
         state.sessions["preview-multi-2"] = s2
         state.sessions["preview-multi-3"] = s3
+        state.sessions["preview-multi-4"] = s4
         state.activeSessionId = "preview-multi-1"
     }
 

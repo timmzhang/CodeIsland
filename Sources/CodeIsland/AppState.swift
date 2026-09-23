@@ -112,6 +112,13 @@ final class AppState {
     }
     @ObservationIgnored
     var browserUseAttentionTimeoutTask: Task<Void, Never>?
+    /// Session whose queued Codex async question still wants its reminder card.
+    /// Nil once the card was dismissed, opened, timed out or the question was
+    /// answered; the session row keeps its own hint from `codexPendingQuestion`.
+    /// See AppState+CodexAsyncQuestion.
+    var codexAsyncQuestionCardSessionId: String?
+    @ObservationIgnored
+    var codexAsyncQuestionTimeoutTask: Task<Void, Never>?
     /// Records the transcript path currently watched for each session so we only
     /// reattach when the path actually changes. See AppState+TranscriptTailer.
     @ObservationIgnored
@@ -711,6 +718,7 @@ final class AppState {
         drainPermissions(forSession: sessionId, reason: "removeSession")
         drainQuestions(forSession: sessionId, reason: "removeSession")
         clearBrowserUseAttention(forSessionId: sessionId, showNext: false)
+        clearCodexAsyncQuestionCard(forSessionId: sessionId, showNext: false)
 
         if surface.sessionId == sessionId {
             autoCollapseTask?.cancel()
@@ -2246,6 +2254,14 @@ final class AppState {
             if surface != .browserUseAttention(sessionId: attention.sessionId) {
                 surface = .browserUseAttention(sessionId: attention.sessionId)
                 SoundManager.shared.handleEvent("PermissionRequest")
+            }
+            return true
+        } else if let sid = codexAsyncQuestionCardSessionId {
+            // The card rides on `.questionCard` with an empty question queue; the
+            // panel renders the display-only Codex bar for that combination.
+            activeSessionId = sid
+            if surface != .questionCard(sessionId: sid) {
+                surface = .questionCard(sessionId: sid)
             }
             return true
         } else if !completionQueue.isEmpty {

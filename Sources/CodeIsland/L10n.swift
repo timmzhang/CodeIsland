@@ -394,6 +394,11 @@ final class L10n: ObservableObject {
 
         // Cursor external question wait (#265)
         "cursor_question_answer_hint": "Answer in Cursor to continue",
+        "codex_async_question_answer_hint": "Codex is waiting for a reply · ⌥↑ in the terminal",
+        "codex_async_question_title": "Codex question",
+        "codex_async_question_subtitle": "queued in the terminal",
+        "codex_async_question_body": "Codex asked a question and kept working. Answer it in the terminal.",
+        "codex_async_question_note": "Reminder only · answer with ⌥↑ in the Codex TUI",
 
         // Session grouping
         "status_running": "Running",
@@ -793,6 +798,11 @@ final class L10n: ObservableObject {
 
         // Cursor external question wait (#265)
         "cursor_question_answer_hint": "Zum Fortfahren in Cursor antworten",
+        "codex_async_question_answer_hint": "Codex wartet auf eine Antwort · ⌥↑ im Terminal",
+        "codex_async_question_title": "Codex-Frage",
+        "codex_async_question_subtitle": "im Terminal eingereiht",
+        "codex_async_question_body": "Codex hat eine Frage gestellt und weitergearbeitet. Beantworte sie im Terminal.",
+        "codex_async_question_note": "Nur Hinweis · mit ⌥↑ in der Codex-TUI antworten",
 
         // Session grouping
         "status_running": "Läuft",
@@ -1157,6 +1167,11 @@ final class L10n: ObservableObject {
 
         // Cursor external question wait (#265)
         "cursor_question_answer_hint": "请在 Cursor 中回答后继续",
+        "codex_async_question_answer_hint": "Codex 在等你回答 · 在终端按 ⌥↑",
+        "codex_async_question_title": "Codex 提问",
+        "codex_async_question_subtitle": "已在终端排队",
+        "codex_async_question_body": "Codex 提了一个问题并继续工作。请在终端回答。",
+        "codex_async_question_note": "仅提醒 · 在 Codex 终端按 ⌥↑ 回答",
 
         // Session grouping
         "status_running": "运行中",
@@ -1625,6 +1640,11 @@ final class L10n: ObservableObject {
 
         // Cursor external question wait (#265)
         "cursor_question_answer_hint": "請在 Cursor 中回答後繼續",
+        "codex_async_question_answer_hint": "Codex 在等你回答 · 在終端按 ⌥↑",
+        "codex_async_question_title": "Codex 提問",
+        "codex_async_question_subtitle": "已在終端排隊",
+        "codex_async_question_body": "Codex 提了一個問題並繼續工作。請在終端回答。",
+        "codex_async_question_note": "僅提醒 · 在 Codex 終端按 ⌥↑ 回答",
 
         // Session grouping
         "status_running": "執行中",
@@ -1989,6 +2009,11 @@ final class L10n: ObservableObject {
 
         // Cursor external question wait (#265)
         "cursor_question_answer_hint": "続行するには Cursor で回答してください",
+        "codex_async_question_answer_hint": "Codex が回答を待っています · ターミナルで ⌥↑",
+        "codex_async_question_title": "Codex の質問",
+        "codex_async_question_subtitle": "ターミナルで待機中",
+        "codex_async_question_body": "Codex が質問したまま作業を続けています。ターミナルで回答してください。",
+        "codex_async_question_note": "通知のみ · Codex TUI で ⌥↑ を押して回答",
 
         // Session grouping
         "status_running": "実行中",
@@ -2406,6 +2431,11 @@ final class L10n: ObservableObject {
 
         // Cursor external question wait (#265)
         "cursor_question_answer_hint": "계속하려면 Cursor에서 답변하세요",
+        "codex_async_question_answer_hint": "Codex가 답변을 기다리는 중 · 터미널에서 ⌥↑",
+        "codex_async_question_title": "Codex 질문",
+        "codex_async_question_subtitle": "터미널에 대기 중",
+        "codex_async_question_body": "Codex가 질문을 남기고 작업을 계속했습니다. 터미널에서 답변하세요.",
+        "codex_async_question_note": "알림 전용 · Codex TUI에서 ⌥↑로 답변",
 
         // Session grouping
         "status_running": "실행 중",
@@ -2823,6 +2853,11 @@ final class L10n: ObservableObject {
 
         // Cursor external question wait (#265)
         "cursor_question_answer_hint": "Devam etmek için Cursor'da yanıtlayın",
+        "codex_async_question_answer_hint": "Codex yanıt bekliyor · terminalde ⌥↑",
+        "codex_async_question_title": "Codex sorusu",
+        "codex_async_question_subtitle": "terminalde sırada",
+        "codex_async_question_body": "Codex bir soru sordu ve çalışmaya devam etti. Terminalde yanıtlayın.",
+        "codex_async_question_note": "Yalnızca hatırlatma · Codex TUI'de ⌥↑ ile yanıtlayın",
 
         // Session grouping
         "status_running": "Çalışıyor",

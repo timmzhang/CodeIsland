@@ -410,9 +410,29 @@ extension AppState {
             }
         }
 
+        // Codex async questions never block the turn and fire no hook: the rollout
+        // row is the only signal, and the reminder must outlive whatever status
+        // the still-running turn reports next.
+        var codexQuestionApplication: CodexAsyncQuestionApplication = .ignored
+        if let signal = delta.codexAsyncQuestion {
+            codexQuestionApplication = Self.applyCodexAsyncQuestionSignal(signal, to: &session)
+            if codexQuestionApplication != .ignored {
+                mutated = true
+                questionStateChanged = true
+            }
+        }
+
         if mutated {
             session.lastActivity = Date()
             sessions[delta.sessionId] = session
+        }
+        switch codexQuestionApplication {
+        case .markedPending(fresh: true):
+            presentCodexAsyncQuestionCard(sessionId: delta.sessionId)
+        case .clearedPending:
+            clearCodexAsyncQuestionCard(forSessionId: delta.sessionId)
+        case .markedPending(fresh: false), .ignored:
+            break
         }
         if questionStateChanged || backgroundStateChanged {
             // Hooks stay silent while Cursor waits on its question, so nothing

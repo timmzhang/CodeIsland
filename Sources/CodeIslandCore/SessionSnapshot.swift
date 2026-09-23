@@ -100,6 +100,13 @@ public struct SessionSnapshot: Sendable {
     /// a question is pending ("" = pending but text unknown). Set and cleared by
     /// transcript-tail detection; transient, never persisted.
     public var cursorPendingQuestion: String?
+    /// Codex-only: text of a `request_user_input_async` question still queued in
+    /// the Codex TUI ("Queued follow-up inputs", ⌥↑ to answer). Unlike Cursor's
+    /// blocking question this never changes `status` — the turn keeps running
+    /// (and may finish) while the question waits — so it is an independent
+    /// display-only flag. Set and cleared by rollout-tail detection; transient,
+    /// never persisted.
+    public var codexPendingQuestion: String?
     /// Recent chat messages (max 3) for preview
     public var recentMessages: [ChatMessage] = []
     // Terminal info for window activation
